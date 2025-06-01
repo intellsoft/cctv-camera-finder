@@ -1,0 +1,28 @@
+{
+    "credential_sets": {
+        "Default Admin": {
+            "username": "admin",
+            "password": "gAAAAABoPCOeTd2uwfSJ6h9teJQm9feVFDGEBOmq47xcx_BZVN9EdoZlaeClnf8Ta-jhkWZ44Yp6d8KLt2Ov3sUYE0iUUXVDeQ=="
+        }
+    },
+    "camera_ip_to_cred_set": {
+        "192.168.111.10": "Default Admin",
+        "192.168.111.20": "Default Admin",
+        "192.168.111.21": "Default Admin",
+        "192.168.111.1": "Default Admin",
+        "192.168.111.13": "Default Admin",
+        "192.168.111.16": "Default Admin",
+        "192.168.111.25": "Default Admin",
+        "192.168.111.17": "Default Admin",
+        "192.168.111.18": "Default Admin",
+        "192.168.111.11": "Default Admin",
+        "192.168.111.12": "Default Admin",
+        "192.168.111.50": "Default Admin",
+        "192.168.111.15": "Default Admin",
+        "192.168.111.14": "Default Admin",
+        "192.168.111.52": "Default Admin",
+        "192.168.111.53": "Default Admin",
+        "192.168.111.51": "Default Admin",
+        "192.168.111.211": "Default Admin"
+    }
+}
