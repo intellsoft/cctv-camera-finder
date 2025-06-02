@@ -63,7 +63,7 @@ This advanced software helps security and network professionals to:
 
 ## System Requirements
 - Python 3.7+
-- Windows/Linux/macOS
+- Windows
 - Network access to target devices
 
 ## Installation
