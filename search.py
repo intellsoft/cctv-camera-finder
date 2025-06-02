@@ -30,7 +30,7 @@ import platform # To check operating system
 # This key is for demonstration purposes as requested by the user.
 FIXED_ENCRYPTION_KEY = b'v8VZkq4W9E7RjTzOYKbLwSdXyGfChN3s1Mn2PpI0Qt6=' 
 # You can generate a key like this: Fernet.generate_key()
-# Example: b'Abcdefghijklmnopqrstuvwxyz1234567890ABCDEF='
+# Example: b'Abcdefghijklmnopqrstuvwxyz134567890ABCDEF='
 
 class RealTimeNetworkScanner:
     def __init__(self, root):
@@ -82,6 +82,10 @@ class RealTimeNetworkScanner:
         self.current_hover_image_tk = None # To prevent GC for the hover image
         self.hover_image_thread = None
         self.last_hover_thread_id = 0 # To ensure only the latest hover request updates the tooltip
+
+        # --- Scan Range Management ---
+        self.scan_range = {"start_ip": "", "end_ip": ""} # Stores the user-defined scan range
+        self.load_settings() # Load scan range and camera data on startup
 
         self.load_camera_data() # Load both credential sets and camera mappings
         
@@ -141,6 +145,30 @@ class RealTimeNetworkScanner:
                 json.dump(data, f, indent=4)
         except Exception as e:
             messagebox.showerror("Error", f"Error saving camera data: {e}")
+
+    def load_settings(self):
+        """Loads application settings, including scan range, from file."""
+        if os.path.exists('app_settings.json'):
+            try:
+                with open('app_settings.json', 'r') as f:
+                    settings = json.load(f)
+                    if 'scan_range' in settings:
+                        self.scan_range = settings['scan_range']
+            except json.JSONDecodeError as e:
+                messagebox.showerror("Error", f"Error reading app_settings.json: {e}\nThe file might be corrupted.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error loading application settings: {e}")
+
+    def save_settings(self):
+        """Saves application settings, including scan range, to file."""
+        settings = {
+            'scan_range': self.scan_range
+        }
+        try:
+            with open('app_settings.json', 'w') as f:
+                json.dump(settings, f, indent=4)
+        except Exception as e:
+            messagebox.showerror("Error", f"Error saving application settings: {e}")
 
     def start_onvif_workers(self):
         """Starts worker threads for ONVIF discovery."""
@@ -279,6 +307,14 @@ class RealTimeNetworkScanner:
         )
         self.manage_creds_btn.pack(side=tk.LEFT, padx=5)
 
+        # Scan Range Management Button
+        self.manage_scan_range_btn = ttk.Button(
+            control_frame,
+            text="Manage Scan Range",
+            command=self.open_scan_range_manager
+        )
+        self.manage_scan_range_btn.pack(side=tk.LEFT, padx=5)
+
         # Export to Excel Button
         self.export_excel_btn = ttk.Button(
             control_frame,
@@ -359,8 +395,8 @@ class RealTimeNetworkScanner:
 
         # Configure tags
         self.tree.tag_configure('ip_dup', background='#ffcccc')
-        self.tree.tag_configure('mac_dup', background='#ffffcc')
-        self.tree.tag_configure('both_dup', background='#ffccff')
+        self.tree.tag_configure('yellow.TFrame', background='#ffffcc')
+        self.tree.tag_configure('purple.TFrame', background='#ffccff')
         self.tree.tag_configure('camera_found', background='#ccffcc')
         self.tree.tag_configure('camera_error', background='#ffcccc')
         
@@ -731,6 +767,62 @@ class RealTimeNetworkScanner:
         cred_manager_window.protocol("WM_DELETE_WINDOW", cred_manager_window.destroy) # Handle window close button
         cred_manager_window.wait_window() # Wait until this window is closed
 
+    def open_scan_range_manager(self):
+        """Opens a window to manage the custom scan IP range."""
+        range_manager_window = tk.Toplevel(self.root)
+        range_manager_window.title("Manage Scan Range")
+        range_manager_window.transient(self.root)
+        range_manager_window.grab_set()
+
+        input_frame = ttk.Frame(range_manager_window, padding="10")
+        input_frame.pack(fill=tk.X)
+
+        ttk.Label(input_frame, text="Start IP Address:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.start_ip_var = tk.StringVar(value=self.scan_range.get("start_ip", ""))
+        start_ip_entry = ttk.Entry(input_frame, textvariable=self.start_ip_var, width=20)
+        start_ip_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+        ttk.Label(input_frame, text="End IP Address:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.end_ip_var = tk.StringVar(value=self.scan_range.get("end_ip", ""))
+        end_ip_entry = ttk.Entry(input_frame, textvariable=self.end_ip_var, width=20)
+        end_ip_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+        button_frame = ttk.Frame(range_manager_window, padding="10")
+        button_frame.pack(fill=tk.X)
+
+        def save_range():
+            start_ip = self.start_ip_var.get().strip()
+            end_ip = self.end_ip_var.get().strip()
+
+            if not start_ip and not end_ip:
+                self.scan_range = {"start_ip": "", "end_ip": ""}
+                self.save_settings()
+                messagebox.showinfo("Success", "Scan range cleared. Will scan local network.", parent=range_manager_window)
+                return
+
+            try:
+                start_ip_obj = ipaddress.IPv4Address(start_ip)
+                end_ip_obj = ipaddress.IPv4Address(end_ip)
+
+                if start_ip_obj > end_ip_obj:
+                    messagebox.showwarning("Warning", "Start IP cannot be greater than End IP.", parent=range_manager_window)
+                    return
+                
+                self.scan_range = {"start_ip": start_ip, "end_ip": end_ip}
+                self.save_settings()
+                messagebox.showinfo("Success", "Scan range saved successfully.", parent=range_manager_window)
+            except ipaddress.AddressValueError:
+                messagebox.showerror("Error", "Invalid IP Address format.", parent=range_manager_window)
+            except Exception as e:
+                messagebox.showerror("Error", f"An error occurred: {e}", parent=range_manager_window)
+
+        ttk.Button(button_frame, text="Save Range", command=save_range).pack(side=tk.LEFT, padx=5, pady=5)
+        ttk.Button(button_frame, text="Clear Range", command=lambda: [self.start_ip_var.set(""), self.end_ip_var.set(""), save_range()]).pack(side=tk.LEFT, padx=5, pady=5)
+        ttk.Button(button_frame, text="Close", command=range_manager_window.destroy).pack(side=tk.RIGHT, padx=5, pady=5)
+
+        range_manager_window.protocol("WM_DELETE_WINDOW", range_manager_window.destroy)
+        range_manager_window.wait_window()
+
     def start_search(self):
         if not self.scanning_active:
             # Reset UI
@@ -774,8 +866,36 @@ class RealTimeNetworkScanner:
             network = ipaddress.ip_network(f"{host_ip}/24", strict=False)
             return list(network.hosts())
         except Exception as e:
-            messagebox.showerror("Error", f"Error detecting network: {str(e)}")
+            messagebox.showerror("Error", f"Error detecting local network: {str(e)}")
             return []
+
+    def get_scan_targets(self):
+        start_ip = self.scan_range.get("start_ip")
+        end_ip = self.scan_range.get("end_ip")
+
+        if start_ip and end_ip:
+            try:
+                start_ip_obj = ipaddress.IPv4Address(start_ip)
+                end_ip_obj = ipaddress.IPv4Address(end_ip)
+                
+                if start_ip_obj > end_ip_obj:
+                    messagebox.showwarning("Warning", "Start IP is greater than End IP in saved settings. Scanning local network instead.")
+                    return self.get_local_network()
+
+                targets = []
+                current_ip = start_ip_obj
+                while current_ip <= end_ip_obj:
+                    targets.append(current_ip)
+                    current_ip += 1
+                return targets
+            except ipaddress.AddressValueError:
+                messagebox.showerror("Error", "Invalid IP Address in saved scan range. Scanning local network instead.")
+                return self.get_local_network()
+            except Exception as e:
+                messagebox.showerror("Error", f"Error processing saved scan range: {e}. Scanning local network instead.")
+                return self.get_local_network()
+        else:
+            return self.get_local_network()
 
     def ip_to_tuple(self, ip_str):
         """Converts IP string to a tuple for sorting."""
@@ -783,10 +903,10 @@ class RealTimeNetworkScanner:
 
     def scan_network(self):
         try:
-            targets = self.get_local_network()
+            targets = self.get_scan_targets()
             total = len(targets)
             if not total:
-                self.update_status("Network not detected!")
+                self.update_status("No targets to scan!")
                 return
 
             self.found_count = 0
