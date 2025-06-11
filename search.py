@@ -43,9 +43,13 @@ class RealTimeNetworkScanner:
         self.scanning_active = False
         self.found_count = 0
         
-        # ONVIF settings
+        # --- Worker Queues ---
+        # Queue for ONVIF discovery tasks
         self.onvif_queue = queue.Queue()
         self.onvif_threads = []
+        # Queue for Port Scanning tasks (NEW)
+        self.port_scan_queue = queue.Queue()
+        self.port_scan_threads = []
 
         # --- Encryption Setup ---
         try:
@@ -91,7 +95,7 @@ class RealTimeNetworkScanner:
         
         self.create_widgets()
         self.setup_style()
-        self.start_onvif_workers()
+        self.start_worker_threads() # Start all worker threads
 
     def encrypt_password(self, password):
         """Encrypts the password."""
@@ -170,18 +174,24 @@ class RealTimeNetworkScanner:
         except Exception as e:
             messagebox.showerror("Error", f"Error saving application settings: {e}")
 
-    def start_onvif_workers(self):
-        """Starts worker threads for ONVIF discovery."""
+    def start_worker_threads(self):
+        """Starts all worker threads (ONVIF and Port Scan)."""
+        # Start ONVIF worker threads
         for _ in range(10):  # 10 threads for concurrent discovery
             t = threading.Thread(target=self.onvif_worker, daemon=True)
             t.start()
             self.onvif_threads.append(t)
+        # Start Port Scan worker threads (NEW)
+        for _ in range(20): # 20 threads for concurrent port scanning
+            t = threading.Thread(target=self.port_scan_worker, daemon=True)
+            t.start()
+            self.port_scan_threads.append(t)
 
     def onvif_worker(self):
-        """ONVIF discovery worker."""
+        """ONVIF discovery worker. Gets tasks from the onvif_queue."""
         while True:
             ip, item_id = self.onvif_queue.get()
-            if self.stop_flag:
+            if self.stop_flag or not self.tree.exists(item_id):
                 self.onvif_queue.task_done()
                 continue
                 
@@ -218,12 +228,53 @@ class RealTimeNetworkScanner:
             self.root.after(0, self.update_camera_info, item_id, cred_set_name, rtsp_url, camera_status, snapshot_uri)
             self.onvif_queue.task_done()
 
+    def port_scan_worker(self):
+        """
+        Port scanning worker. Gets tasks from the port_scan_queue.
+        This is a new worker to handle port scanning concurrently.
+        """
+        while True:
+            ip, item_id = self.port_scan_queue.get()
+            if self.stop_flag or not self.tree.exists(item_id):
+                self.port_scan_queue.task_done()
+                continue
+            
+            common_ports = [80, 443, 554, 8080, 8000, 22, 23, 37777, 8899, 81]
+            open_ports = []
+            
+            # Use a thread pool for scanning ports of a single IP to speed it up
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(common_ports)) as executor:
+                future_to_port = {executor.submit(self.scan_single_port, ip, port): port for port in common_ports}
+                for future in concurrent.futures.as_completed(future_to_port):
+                    port = future_to_port[future]
+                    try:
+                        if future.result():
+                            open_ports.append(port)
+                    except Exception:
+                        pass # Ignore exceptions from individual port scans
+            
+            # Sort the found ports
+            open_ports.sort()
+            
+            # Update the UI with the found open ports
+            self.root.after(0, self.update_open_ports, item_id, open_ports)
+            self.port_scan_queue.task_done()
+
+    def scan_single_port(self, ip, port):
+        """Scans a single port on a given IP. Returns True if open, False otherwise."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5) # Short timeout for faster scanning
+                s.connect((ip, port))
+                return True
+        except (socket.timeout, ConnectionRefusedError):
+            return False
+        except Exception:
+            return False
+
     def check_onvif_camera(self, ip, username, password):
         """
         Checks for ONVIF camera presence and extracts RTSP and Snapshot URIs.
-        Note: RTSP URI is for video stream. Snapshot URI is for a static image.
-        Directly getting a static image from an RTSP URI is not supported here
-        and would require video processing libraries (like OpenCV).
         """
         rtsp_url = ""
         snapshot_uri = ""
@@ -249,21 +300,20 @@ class RealTimeNetworkScanner:
 
             # Try to get Snapshot URI
             try:
-                # Imaging Service is used to get Snapshot URI.
-                # This is the standard ONVIF method for static images.
                 imaging_service = cam.create_imaging_service()
                 snapshot_uri_response = imaging_service.GetSnapshotUri({'ProfileToken': token})
                 snapshot_uri = snapshot_uri_response.Uri
             except Exception as e:
-                # If camera does not support Imaging Service or an error occurs.
                 print(f"Error getting Snapshot URI for {ip}: {e}")
-                snapshot_uri = "" # No snapshot URI available
+                snapshot_uri = ""
 
             return "ONVIF Found", rtsp_url, snapshot_uri
         except Exception as e:
-            if "Unauthorized" in str(e) or "401" in str(e):
+            # Handle specific error types for clearer status messages
+            error_str = str(e).lower()
+            if "unauthorized" in error_str or "401" in error_str:
                 return "Auth Failed", "", ""
-            elif "timed out" in str(e):
+            elif "timed out" in error_str or "timeout" in error_str:
                 return "Timeout", "", ""
             else:
                 return "Error", "", str(e)
@@ -352,7 +402,7 @@ class RealTimeNetworkScanner:
 
         self.progress_label = ttk.Label(
             self.progress_frame,
-            text="Ready to scan..."
+            text="آماده برای اسکن..."
         )
         self.progress_label.pack(side=tk.LEFT)
 
@@ -368,8 +418,8 @@ class RealTimeNetworkScanner:
         tree_frame = ttk.Frame(main_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Add new columns
-        columns = ('IP', 'MAC', 'Hostname', 'Last Seen', 'Credential Set', 'RTSP URL', 'Camera Status', 'Snapshot')
+        # UPDATED: Added 'Open Ports' column
+        columns = ('IP', 'MAC', 'Hostname', 'Last Seen', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
         self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
         
         # Configure columns
@@ -378,10 +428,11 @@ class RealTimeNetworkScanner:
             'MAC': 130, 
             'Hostname': 150, 
             'Last Seen': 100,
-            'Credential Set': 120, # New column for credential set name
+            'Credential Set': 120,
+            'Open Ports': 120, # NEW: Width for Open Ports column
             'RTSP URL': 250,
             'Camera Status': 150,
-            'Snapshot': 80 # New column for snapshot status
+            'Snapshot': 80
         }
         for col in columns:
             self.tree.heading(col, text=col)
@@ -458,33 +509,24 @@ class RealTimeNetworkScanner:
 
     def on_right_click(self, event):
         """Handles right-click event on the Treeview."""
-        # Identify the item and column clicked
         item_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)
 
         if not item_id or not column_id:
             return
 
-        # Get the column name from its ID (e.g., '#1' -> 'IP')
         col_index = int(column_id.replace('#', '')) - 1
-        columns = ('IP', 'MAC', 'Hostname', 'Last Seen', 'Credential Set', 'RTSP URL', 'Camera Status', 'Snapshot')
+        # UPDATED: Added 'Open Ports' to columns tuple for right-click context
+        columns = ('IP', 'MAC', 'Hostname', 'Last Seen', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
         column_name = columns[col_index] if 0 <= col_index < len(columns) else None
 
         if not column_name:
             return
 
-        # Get the cell value
         cell_value = self.tree.item(item_id, 'values')[col_index]
 
-        # Create a context menu
         context_menu = Menu(self.root, tearoff=0)
-
-        # Add "Copy" option
         context_menu.add_command(label=f"Copy '{cell_value}'", command=lambda: self.copy_to_clipboard(cell_value))
-
-        # The "View Snapshot" option is removed from the right-click menu as per user request.
-        # It is now handled by the hover functionality.
-
         context_menu.post(event.x_root, event.y_root)
 
     def copy_to_clipboard(self, text):
@@ -512,11 +554,9 @@ class RealTimeNetworkScanner:
             sheet = workbook.active
             sheet.title = "Network Scan Results"
 
-            # Write headers
             headers = [self.tree.heading(col)['text'] for col in self.tree['columns']]
             sheet.append(headers)
 
-            # Write data
             for item_id in self.tree.get_children():
                 values = self.tree.item(item_id, 'values')
                 sheet.append(values)
@@ -531,11 +571,10 @@ class RealTimeNetworkScanner:
         """Updates credential combobox options."""
         self.cred_set_combobox['values'] = list(self.credential_sets.keys())
         if self.cred_set_combobox['values']:
-            self.cred_set_var.set(self.cred_set_combobox['values'][0]) # Set default selection
+            self.cred_set_var.set(self.cred_set_combobox['values'][0])
 
     def on_cred_set_selected(self, event):
         """Handles selection of a credential set from the combobox."""
-        # No direct action needed here, the "Apply" button will handle it.
         pass
 
     def apply_camera_credentials(self):
@@ -554,14 +593,12 @@ class RealTimeNetworkScanner:
             messagebox.showwarning("Warning", "Please select a valid credential set.")
             return
 
-        # Update IP to credential set mapping
         self.camera_ip_to_cred_set[ip] = selected_cred_set_name
         self.save_camera_data()
             
-        # Update values in Treeview
         new_values = list(values)
-        if len(new_values) >= 5: # Ensure we have enough columns
-            new_values[4] = selected_cred_set_name # Update Credential Set column
+        if len(new_values) >= 5:
+            new_values[4] = selected_cred_set_name
             self.tree.item(item, values=new_values)
             
             # Restart ONVIF discovery for this camera with new credentials
@@ -576,7 +613,6 @@ class RealTimeNetworkScanner:
         if selected:
             values = self.tree.item(selected[0], 'values')
             ip = values[0]
-            # Set the combobox to the currently associated credential set for this IP
             associated_cred_set = self.camera_ip_to_cred_set.get(ip, "Default Admin")
             self.cred_set_var.set(associated_cred_set)
 
@@ -584,10 +620,9 @@ class RealTimeNetworkScanner:
         """Opens the credential management window."""
         cred_manager_window = tk.Toplevel(self.root)
         cred_manager_window.title("Manage Credential Sets")
-        cred_manager_window.transient(self.root) # Make it modal to the main window
-        cred_manager_window.grab_set() # Grab all events until this window is closed
+        cred_manager_window.transient(self.root)
+        cred_manager_window.grab_set()
 
-        # Input Frame
         input_frame = ttk.Frame(cred_manager_window, padding="10")
         input_frame.pack(fill=tk.X)
 
@@ -606,14 +641,13 @@ class RealTimeNetworkScanner:
         cred_password_entry = ttk.Entry(input_frame, textvariable=cred_password_var, width=30, show='*')
         cred_password_entry.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
 
-        # Buttons Frame
         button_frame = ttk.Frame(cred_manager_window, padding="10")
         button_frame.pack(fill=tk.X)
 
         def add_cred_set():
             name = cred_name_var.get().strip()
             username = cred_username_var.get().strip()
-            password = cred_password_var.get() # Don't strip password to allow spaces
+            password = cred_password_var.get()
 
             if not name or not username:
                 messagebox.showwarning("Warning", "Set name and username cannot be empty.", parent=cred_manager_window)
@@ -622,12 +656,11 @@ class RealTimeNetworkScanner:
                 messagebox.showwarning("Warning", f"Set '{name}' already exists. Use 'Update' button to modify.", parent=cred_manager_window)
                 return
             
-            # Encrypt password before storing
             encrypted_password = self.encrypt_password(password)
             self.credential_sets[name] = {"username": username, "password": encrypted_password}
             self.save_camera_data()
             update_cred_treeview()
-            self.update_cred_combobox_options() # Update main window combobox
+            self.update_cred_combobox_options()
             messagebox.showinfo("Success", f"Credential set '{name}' added.", parent=cred_manager_window)
             cred_name_var.set("")
             cred_username_var.set("")
@@ -656,13 +689,10 @@ class RealTimeNetworkScanner:
                 messagebox.showwarning("Warning", f"Set '{new_name}' already exists.", parent=cred_manager_window)
                 return
 
-            # Encrypt password before storing
             encrypted_password = self.encrypt_password(password)
 
-            # If name changed, delete old entry and add new
             if new_name != old_name:
                 del self.credential_sets[old_name]
-                # Update any cameras using the old name
                 for ip, name in list(self.camera_ip_to_cred_set.items()):
                     if name == old_name:
                         self.camera_ip_to_cred_set[ip] = new_name
@@ -688,7 +718,6 @@ class RealTimeNetworkScanner:
                 messagebox.showwarning("Warning", "The 'Default Admin' set cannot be deleted.", parent=cred_manager_window)
                 return
 
-            # Check if any camera is using this credential set
             cameras_using_this_set = [ip for ip, name in self.camera_ip_to_cred_set.items() if name == name_to_delete]
             if cameras_using_this_set:
                 confirm = messagebox.askyesno(
@@ -699,14 +728,12 @@ class RealTimeNetworkScanner:
                 if not confirm:
                     return
 
-                # Reassign cameras to "Default Admin"
                 for ip in cameras_using_this_set:
                     self.camera_ip_to_cred_set[ip] = "Default Admin"
-                    # Also update the main Treeview if these IPs are currently displayed
                     for item_id in self.tree.get_children():
                         if self.tree.item(item_id, 'values')[0] == ip:
                             current_values = list(self.tree.item(item_id, 'values'))
-                            current_values[4] = "Default Admin" # Update Credential Set column
+                            current_values[4] = "Default Admin"
                             self.tree.item(item_id, values=current_values)
 
 
@@ -723,7 +750,6 @@ class RealTimeNetworkScanner:
         ttk.Button(button_frame, text="Update", command=update_cred_set).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="Delete", command=delete_cred_set).pack(side=tk.LEFT, padx=5, pady=5)
 
-        # Credential List Treeview
         cred_tree_frame = ttk.Frame(cred_manager_window, padding="10")
         cred_tree_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -744,8 +770,6 @@ class RealTimeNetworkScanner:
                 values = cred_tree.item(selected[0], 'values')
                 cred_name_var.set(values[0])
                 cred_username_var.set(values[1])
-                # Do NOT set password_var with decrypted password for security
-                # Instead, leave it blank or allow user to re-enter if updating password
                 cred_password_var.set("") 
 
         cred_tree.bind('<<TreeviewSelect>>', on_cred_tree_select)
@@ -757,15 +781,14 @@ class RealTimeNetworkScanner:
                 decrypted_password_display = self.decrypt_password(creds['password'])
                 cred_tree.insert('', tk.END, values=(name, creds['username'], decrypted_password_display))
         
-        update_cred_treeview() # Populate treeview on open
+        update_cred_treeview()
 
-        # Close button
         close_button_frame = ttk.Frame(cred_manager_window, padding="10")
         close_button_frame.pack(fill=tk.X)
         ttk.Button(close_button_frame, text="Close", command=cred_manager_window.destroy).pack(side=tk.RIGHT, padx=5, pady=5)
 
-        cred_manager_window.protocol("WM_DELETE_WINDOW", cred_manager_window.destroy) # Handle window close button
-        cred_manager_window.wait_window() # Wait until this window is closed
+        cred_manager_window.protocol("WM_DELETE_WINDOW", cred_manager_window.destroy)
+        cred_manager_window.wait_window()
 
     def open_scan_range_manager(self):
         """Opens a window to manage the custom scan IP range."""
@@ -825,14 +848,12 @@ class RealTimeNetworkScanner:
 
     def start_search(self):
         if not self.scanning_active:
-            # Reset UI
             self.found_count = 0
             for item in self.tree.get_children():
                 self.tree.delete(item)
-            self.thumbnail_cache = {} # Clear thumbnail cache
-            self.hover_image_cache = {} # Clear hover thumbnail cache
+            self.thumbnail_cache = {}
+            self.hover_image_cache = {}
             
-            # Show progress bar
             self.progress_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True)
             self.progress_bar['value'] = 0
             
@@ -840,7 +861,7 @@ class RealTimeNetworkScanner:
             self.stop_flag = False
             self.search_btn['state'] = tk.DISABLED
             self.stop_btn['state'] = tk.NORMAL
-            self.update_status("Starting scan...")
+            self.update_status("شروع اسکن...")
             self.search_thread = threading.Thread(target=self.scan_network)
             self.search_thread.start()
 
@@ -849,8 +870,8 @@ class RealTimeNetworkScanner:
         self.stop_flag = True
         self.search_btn['state'] = tk.NORMAL
         self.stop_btn['state'] = tk.DISABLED
-        self.update_status("Scan stopped.")
-        self.progress_bar.pack_forget()  # Hide progress bar
+        self.update_status("اسکن متوقف شد.")
+        self.progress_bar.pack_forget()
 
     def update_status(self, message):
         self.progress_label['text'] = message
@@ -906,13 +927,12 @@ class RealTimeNetworkScanner:
             targets = self.get_scan_targets()
             total = len(targets)
             if not total:
-                self.update_status("No targets to scan!")
+                self.update_status("هیچ هدفی برای اسکن وجود ندارد!")
                 return
 
             self.found_count = 0
-            self.update_status("Scanning network...")
+            self.update_status("در حال اسکن شبکه...")
             
-            # Parallel scanning using ThreadPoolExecutor
             with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
                 futures = {executor.submit(self.scan_ip, str(ip)): ip for ip in targets}
                 
@@ -927,17 +947,18 @@ class RealTimeNetworkScanner:
                             ip_str, mac, hostname = result
                             self.found_count += 1
                             
-                            # Assign "Default Admin" credential set to newly found devices
                             if ip_str not in self.camera_ip_to_cred_set:
                                 self.camera_ip_to_cred_set[ip_str] = "Default Admin"
                                 self.save_camera_data()
 
+                            # UPDATED: Added placeholder for 'Open Ports'
                             device = (
                                 ip_str,
                                 mac,
                                 hostname,
                                 datetime.now().strftime("%H:%M:%S"),
-                                self.camera_ip_to_cred_set.get(ip_str, "Default Admin"),  # Credential Set Name
+                                self.camera_ip_to_cred_set.get(ip_str, "Default Admin"),
+                                "Scanning...", # Open Ports
                                 "",  # RTSP URL
                                 "Searching...",  # Camera Status
                                 "Unavailable" # Snapshot status
@@ -945,14 +966,13 @@ class RealTimeNetworkScanner:
                             self.root.after(0, self.add_device, device)
                     
                     except Exception as e:
-                        pass
+                        pass # Ignore errors from individual IP scans
                     
-                    # Update progress
                     progress = (i + 1) / total * 100
                     self.root.after(0, self.update_progress, progress)
-                    self.root.after(0, self.update_status, f"Scanning: {progress:.1f}%")
+                    self.root.after(0, self.update_status, f"در حال اسکن: {progress:.1f}%")
 
-            self.update_status(f"Network scan complete. {self.found_count} devices found.")
+            self.update_status(f"اسکن شبکه کامل شد. {self.found_count} دستگاه پیدا شد.")
         
         except Exception as e:
             messagebox.showerror("Error", f"Error scanning network: {str(e)}")
@@ -960,7 +980,6 @@ class RealTimeNetworkScanner:
             self.scanning_active = False
             self.search_btn['state'] = tk.NORMAL
             self.stop_btn['state'] = tk.DISABLED
-            # Hide progress bar after a short delay
             self.root.after(2000, self.progress_bar.pack_forget)
 
     def scan_ip(self, ip_str):
@@ -968,7 +987,6 @@ class RealTimeNetworkScanner:
         if self.stop_flag:
             return None
             
-        # Use ping with shorter timeout
         response = ping(ip_str, timeout=0.3)
         if response is not None and response:
             mac, hostname = self.get_device_details(ip_str)
@@ -981,31 +999,26 @@ class RealTimeNetworkScanner:
             mac = "Unknown"
             hostname = "Unknown"
 
-            # Get MAC from ARP table
-            # Use CREATE_NO_WINDOW on Windows to prevent CMD window
             creation_flags = 0
             if platform.system() == "Windows":
-                # CREATE_NO_WINDOW is a subprocess flag to prevent a console window from appearing
                 creation_flags = subprocess.CREATE_NO_WINDOW
 
             try:
-                # Use subprocess.run for more control over window creation
                 arp_process = subprocess.run(
                     ['arp', '-a', ip],
-                    capture_output=True, # captures stdout and stderr
-                    text=True,           # decodes output as text
-                    check=True,          # raises CalledProcessError for non-zero exit codes
-                    creationflags=creation_flags, # Hide window on Windows
-                    timeout=2 # Add a timeout for arp command
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    creationflags=creation_flags,
+                    timeout=2
                 )
                 arp_output = arp_process.stdout
                 mac_match = re.search(r"([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})", arp_output)
                 mac = mac_match.group(0).lower() if mac_match else "Unknown"
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
                 print(f"Error running arp for {ip}: {e}")
-                mac = "Unknown" # Fallback if arp fails or times out
+                mac = "Unknown"
 
-            # Get hostname
             try:
                 hostname = socket.gethostbyaddr(ip)[0]
             except (socket.herror, socket.gaierror):
@@ -1016,11 +1029,11 @@ class RealTimeNetworkScanner:
             return "Error", f"Error: {str(e)}"
 
     def add_device(self, device):
-        """Adds a device to the table in sorted order."""
-        # Convert IP to sortable format
+        """
+        Adds a device to the table and queues it for ONVIF and Port scanning.
+        """
         ip_tuple = self.ip_to_tuple(device[0])
         
-        # Find the correct position to insert
         position = 0
         for child in self.tree.get_children():
             child_ip = self.tree.item(child, 'values')[0]
@@ -1029,69 +1042,78 @@ class RealTimeNetworkScanner:
                 break
             position += 1
         
-        # Insert item at the correct position
         item_id = self.tree.insert('', position, values=device)
         
-        # Start ONVIF discovery for this device
+        # Queue the device for both ONVIF and Port scanning to run concurrently
         self.onvif_queue.put((device[0], item_id))
+        self.port_scan_queue.put((device[0], item_id))
+        
         self.highlight_duplicates()
 
-    def update_camera_info(self, item_id, cred_set_name, rtsp_url, camera_status, snapshot_uri):
-        """Updates camera information in the UI."""
+    def update_open_ports(self, item_id, open_ports):
+        """
+        NEW: Updates the 'Open Ports' column for a specific item in the treeview.
+        """
         if self.tree.exists(item_id):
             values = list(self.tree.item(item_id, 'values'))
             
-            # Ensure we have enough columns
-            while len(values) < 8: # Added one more column for Snapshot
+            ports_str = ', '.join(map(str, open_ports)) if open_ports else "None"
+            
+            if len(values) >= 6: # Ensure column exists
+                values[5] = ports_str # Index 5 is 'Open Ports'
+                self.tree.item(item_id, values=values)
+
+    def update_camera_info(self, item_id, cred_set_name, rtsp_url, camera_status, snapshot_uri):
+        """Updates camera information in the UI, now with adjusted indices."""
+        if self.tree.exists(item_id):
+            values = list(self.tree.item(item_id, 'values'))
+            
+            # Ensure we have enough columns (now 9)
+            while len(values) < 9:
                 values.append('')
             
-            # Update values
-            values[4] = cred_set_name # Credential Set Name
-            values[5] = rtsp_url
-            values[6] = camera_status
+            # UPDATED: Indices are shifted due to the new 'Open Ports' column
+            values[4] = cred_set_name    # Credential Set
+            values[6] = rtsp_url         # RTSP URL
+            values[7] = camera_status    # Camera Status
             
-            # Determine snapshot status based on whether snapshot_uri or rtsp_url is available
-            snapshot_status_text = "View Image" if snapshot_uri or rtsp_url else "Unavailable"
-            values[7] = snapshot_status_text # Snapshot status text
+            # UPDATED: New logic for Auth Failed reminder
+            if camera_status == "Auth Failed":
+                values[6] = "رمز و نام کاربری را بررسی کنید" # "Check username and password"
 
-            # Store snapshot_uri as a tag for later retrieval
+            snapshot_status_text = "View Image" if snapshot_uri or rtsp_url else "Unavailable"
+            values[8] = snapshot_status_text # Snapshot status
+            
             current_tags = list(self.tree.item(item_id, 'tags'))
-            # Remove any old snapshot_uri tag
             current_tags = [tag for tag in current_tags if not tag.startswith('snapshot_uri:')]
             if snapshot_uri:
                 current_tags.append(f'snapshot_uri:{snapshot_uri}')
             
-            # Apply tags based on status
             tags = []
             if "ONVIF Found" in camera_status:
                 tags.append('camera_found')
             elif "Error" in camera_status or "Failed" in camera_status:
                 tags.append('camera_error')
             
-            # Keep existing tags and add new ones
             tags.extend(current_tags)
             
-            # Set the image for the row if snapshot is available and icon is loaded
             if snapshot_status_text == "View Image" and self.camera_icon:
                 self.tree.item(item_id, values=values, tags=tuple(tags), image=self.camera_icon)
             else:
-                self.tree.item(item_id, values=values, tags=tuple(tags), image='') # Clear image if not available or icon failed
+                self.tree.item(item_id, values=values, tags=tuple(tags), image='')
 
     def highlight_duplicates(self):
         ip_list = []
         mac_list = []
         
-        # Collect all values
         for child in self.tree.get_children():
             values = self.tree.item(child, 'values')
             ip_list.append(values[0])
             mac_list.append(values[1])
         
-        # Check duplicates
         ip_counts = {ip: ip_list.count(ip) for ip in ip_list}
         mac_counts = {mac: mac_list.count(mac) for mac in mac_list}
         
-        # Apply tags
         for child in self.tree.get_children():
             values = self.tree.item(child, 'values')
             ip, mac = values[0], values[1]
@@ -1102,7 +1124,6 @@ class RealTimeNetworkScanner:
             if mac_counts.get(mac, 0) > 1:
                 tags.append('mac_dup')
             
-            # Preserve camera status tags and snapshot_uri tags
             existing_tags = list(self.tree.item(child, 'tags'))
             for tag in existing_tags:
                 if tag.startswith('camera_') or tag.startswith('snapshot_uri:'):
@@ -1115,19 +1136,19 @@ class RealTimeNetworkScanner:
         item_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)
 
-        # Check if it's the 'Snapshot' column (index 7) and a valid item
-        if item_id and column_id == '#8': # Column index for 'Snapshot'
+        # UPDATED: Column index for 'Snapshot' is now #9
+        if item_id and column_id == '#9':
             item_values = self.tree.item(item_id, 'values')
-            snapshot_status_text = item_values[7]
+            snapshot_status_text = item_values[8]
 
             if snapshot_status_text == "View Image":
                 if item_id != self.current_hover_item:
-                    # New item hovered, hide previous and start new
                     self._hide_hover_image()
                     self.current_hover_item = item_id
 
+                    # UPDATED: Indices for fetching values
                     ip = item_values[0]
-                    rtsp_url = item_values[5]
+                    rtsp_url = item_values[6] 
                     snapshot_uri = ""
                     item_tags = self.tree.item(item_id, 'tags')
                     for tag in item_tags:
@@ -1140,16 +1161,14 @@ class RealTimeNetworkScanner:
                     username = cred_info['username'] if cred_info else "admin"
                     password = self.decrypt_password(cred_info['password']) if cred_info else "admin"
 
-                    # Create hover window
                     self.hover_window = tk.Toplevel(self.root)
-                    self.hover_window.wm_overrideredirect(True) # Remove window decorations
-                    self.hover_window.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}") # Position near mouse
-                    self.hover_window.attributes("-topmost", True) # Keep on top
+                    self.hover_window.wm_overrideredirect(True)
+                    self.hover_window.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+                    self.hover_window.attributes("-topmost", True)
 
                     self.hover_image_label = ttk.Label(self.hover_window, text="Loading...")
                     self.hover_image_label.pack(padx=5, pady=5)
                     
-                    # Start thread to fetch thumbnail
                     self.last_hover_thread_id += 1
                     thread_id = self.last_hover_thread_id
                     self.hover_image_thread = threading.Thread(target=self._fetch_thumbnail_for_hover, 
@@ -1157,9 +1176,9 @@ class RealTimeNetworkScanner:
                     self.hover_image_thread.daemon = True
                     self.hover_image_thread.start()
             else:
-                self._hide_hover_image() # Not "View Image" text, hide hover
+                self._hide_hover_image()
         else:
-            self._hide_hover_image() # Not hovering over snapshot column, hide hover
+            self._hide_hover_image()
 
     def _on_tree_leave(self, event):
         """Handles mouse leaving the Treeview, hides hover image."""
@@ -1172,41 +1191,36 @@ class RealTimeNetworkScanner:
             self.hover_window = None
             self.hover_image_label = None
             self.current_hover_item = None
-            self.current_hover_image_tk = None # Clear reference
+            self.current_hover_image_tk = None
 
     def _fetch_thumbnail_for_hover(self, thread_id, ip, username, password, rtsp_url, snapshot_uri):
         """Fetches and processes a thumbnail for hover display."""
         if thread_id != self.last_hover_thread_id:
-            # A newer hover request has started, so this thread's result is no longer needed.
             return
 
-        thumbnail_size = (160, 120) # Desired thumbnail size
+        thumbnail_size = (160, 120)
         image_key = f"hover_thumbnail_{ip}"
 
         if image_key in self.hover_image_cache:
-            # Use cached image if available
             self.root.after(0, lambda: self._update_hover_window(thread_id, self.hover_image_cache[image_key]))
             return
 
         image_data = None
         
-        # Try fetching from snapshot_uri first
         if snapshot_uri:
             try:
                 auth = (username, password) if username and password else None
-                response = requests.get(snapshot_uri, auth=auth, timeout=3) # Shorter timeout for hover
+                response = requests.get(snapshot_uri, auth=auth, timeout=3)
                 response.raise_for_status()
                 image_data = response.content
             except Exception as e:
                 print(f"Error fetching hover thumbnail from Snapshot URI ({snapshot_uri}): {e}")
-                image_data = None # Try RTSP next
+                image_data = None
 
-        # If snapshot failed or not available, try RTSP
         if not image_data and rtsp_url:
             try:
                 import cv2 # Import here to provide specific error if not installed
                 
-                # Construct RTSP URL with credentials if available
                 if username and password:
                     parsed_url = urlparse(rtsp_url)
                     netloc_with_auth = f"{username}:{password}@{parsed_url.hostname}"
@@ -1220,9 +1234,8 @@ class RealTimeNetworkScanner:
                 if not cap.isOpened():
                     raise ConnectionError("Cannot open RTSP stream for thumbnail.")
                 
-                # Read a few frames to ensure buffer is filled, then get the last one
                 ret, frame = False, None
-                for _ in range(5): # Read a few frames to get a more recent one
+                for _ in range(5):
                     ret, frame = cap.read()
                     if not ret:
                         break
@@ -1230,13 +1243,10 @@ class RealTimeNetworkScanner:
                 cap.release()
                 
                 if ret and frame is not None:
-                    # Convert OpenCV BGR image to RGB PIL Image
                     image_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                    # Resize for thumbnail
                     image_pil.thumbnail(thumbnail_size, Image.LANCZOS)
-                    # Convert back to bytes for caching or direct use
                     img_byte_arr = io.BytesIO()
-                    image_pil.save(img_byte_arr, format='PNG') # Use PNG for lossless
+                    image_pil.save(img_byte_arr, format='PNG')
                     image_data = img_byte_arr.getvalue()
                 else:
                     raise ValueError("Failed to read frame from RTSP stream for thumbnail.")
@@ -1253,7 +1263,7 @@ class RealTimeNetworkScanner:
                 img = Image.open(io.BytesIO(image_data))
                 img.thumbnail(thumbnail_size, Image.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
-                self.hover_image_cache[image_key] = photo # Cache the PhotoImage
+                self.hover_image_cache[image_key] = photo
                 self.root.after(0, lambda: self._update_hover_window(thread_id, photo))
             except Exception as e:
                 print(f"Error processing image for hover: {e}")
@@ -1264,21 +1274,21 @@ class RealTimeNetworkScanner:
     def _update_hover_window(self, thread_id, photo):
         """Updates the hover window with the thumbnail."""
         if thread_id != self.last_hover_thread_id or not self.hover_window:
-            return # This update is for an outdated hover request or window no longer exists
+            return
 
         if self.hover_image_label:
-            self.hover_image_label.destroy() # Remove "Loading..." text
+            self.hover_image_label.destroy()
         
-        self.current_hover_image_tk = photo # Keep a reference
+        self.current_hover_image_tk = photo
         image_label = ttk.Label(self.hover_window, image=photo)
         image_label.pack()
         self.hover_window.update_idletasks()
-        self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}") # Recalculate size
+        self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}")
 
     def _update_hover_window_error(self, thread_id, message):
         """Updates the hover window with an error message."""
         if thread_id != self.last_hover_thread_id or not self.hover_window:
-            return # This update is for an outdated hover request or window no longer exists
+            return
 
         if self.hover_image_label:
             self.hover_image_label.config(text=message)
@@ -1286,7 +1296,7 @@ class RealTimeNetworkScanner:
             error_label = ttk.Label(self.hover_window, text=message)
             error_label.pack(padx=5, pady=5)
         self.hover_window.update_idletasks()
-        self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}") # Recalculate size
+        self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}")
 
 
 if __name__ == "__main__":
