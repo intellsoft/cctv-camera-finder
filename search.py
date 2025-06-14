@@ -32,6 +32,57 @@ FIXED_ENCRYPTION_KEY = b'v8VZkq4W9E7RjTzOYKbLwSdXyGfChN3s1Mn2PpI0Qt6='
 # You can generate a key like this: Fernet.generate_key()
 # Example: b'Abcdefghijklmnopqrstuvwxyz134567890ABCDEF='
 
+class CmdToolExecutor:
+    """
+    A helper class to execute CMD commands in a separate thread
+    and update a Tkinter Text widget.
+    """
+    def __init__(self, output_widget, root_after_callback):
+        self.output_widget = output_widget
+        self.root_after = root_after_callback
+
+    def execute_command(self, command):
+        # Corrected: Pass clear_previous via lambda to _update_output_gui
+        self.root_after(0, lambda: self._update_output_gui(f"Executing: {command}\n\n", clear_previous=True))
+        threading.Thread(target=self._run_command_in_thread, args=(command,), daemon=True).start()
+
+    def _run_command_in_thread(self, command):
+        try:
+            creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+            process = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+                encoding='utf-8',
+                errors='replace',
+                creationflags=creation_flags,
+                timeout=60 # Increased timeout for potentially longer commands like tracert
+            )
+            output = process.stdout
+            error_output = process.stderr
+            self.root_after(0, self._update_output_gui, output, error_output)
+        except subprocess.TimeoutExpired:
+            self.root_after(0, self._update_output_gui, f"Command '{command}' timed out after 60 seconds.", "", is_error=True)
+        except Exception as e:
+            self.root_after(0, self._update_output_gui, f"Error executing command: {e}", "", is_error=True)
+
+    def _update_output_gui(self, output, error_output="", clear_previous=False, is_error=False):
+        self.output_widget.config(state=tk.NORMAL)
+        if clear_previous:
+            self.output_widget.delete(1.0, tk.END)
+        
+        self.output_widget.insert(tk.END, output)
+        if error_output:
+            self.output_widget.insert(tk.END, f"\n\n--- ERROR ---\n{error_output}")
+        if is_error:
+            self.output_widget.tag_configure("error", foreground="red")
+            self.output_widget.insert(tk.END, "\n\n--- COMMAND FAILED ---\n", "error")
+
+        self.output_widget.see(tk.END)
+        self.output_widget.config(state=tk.DISABLED)
+
 class RealTimeNetworkScanner:
     def __init__(self, root):
         self.root = root
@@ -372,6 +423,15 @@ class RealTimeNetworkScanner:
             command=self.export_to_excel
         )
         self.export_excel_btn.pack(side=tk.LEFT, padx=5)
+
+        # CMD Tools Menubutton (Updated)
+        self.cmd_tools_menubutton = ttk.Menubutton(control_frame, text="CMD Tools")
+        self.cmd_tools_menubutton.menu = Menu(self.cmd_tools_menubutton, tearoff=0)
+        self.cmd_tools_menubutton["menu"] = self.cmd_tools_menubutton.menu
+        self.cmd_tools_menubutton.pack(side=tk.LEFT, padx=5)
+        
+        # Add CMD Tool Categories
+        self._create_cmd_tool_menus()
 
         # Camera Credentials Selection Frame (for selected camera)
         cred_selection_frame = ttk.Frame(control_frame)
@@ -828,7 +888,7 @@ class RealTimeNetworkScanner:
                 end_ip_obj = ipaddress.IPv4Address(end_ip)
 
                 if start_ip_obj > end_ip_obj:
-                    messagebox.showwarning("Warning", "Start IP cannot be greater than End IP.", parent=range_manager_window)
+                    messagebox.showwarning("Warning", "Start IP cannot be greater than End IP in saved settings. Scanning local network instead.", parent=range_manager_window)
                     return
                 
                 self.scan_range = {"start_ip": start_ip, "end_ip": end_ip}
@@ -845,6 +905,222 @@ class RealTimeNetworkScanner:
 
         range_manager_window.protocol("WM_DELETE_WINDOW", range_manager_window.destroy)
         range_manager_window.wait_window()
+
+    def _create_cmd_tool_menus(self):
+        """Creates the dropdown menus for CMD Tools."""
+        # Network and Troubleshooting (Priority 1)
+        network_menu = Menu(self.cmd_tools_menubutton.menu, tearoff=0)
+        self.cmd_tools_menubutton.menu.add_cascade(label="Network & Troubleshooting", menu=network_menu)
+        
+        # Sub-menu: IP Configuration
+        ip_config_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="IP Configuration", menu=ip_config_menu)
+        ip_config_menu.add_command(label="ipconfig", command=lambda: self.open_cmd_tools_window("ipconfig"))
+        ip_config_menu.add_command(label="ipconfig /all", command=lambda: self.open_cmd_tools_window("ipconfig /all"))
+        ip_config_menu.add_command(label="ipconfig /renew", command=lambda: self.open_cmd_tools_window("ipconfig /renew"))
+        ip_config_menu.add_command(label="ipconfig /release", command=lambda: self.open_cmd_tools_window("ipconfig /release"))
+
+        # Sub-menu: Connectivity Test
+        conn_test_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="Connectivity Test", menu=conn_test_menu)
+        conn_test_menu.add_command(label="ping google.com", command=lambda: self.open_cmd_tools_window("ping google.com -n 4"))
+        conn_test_menu.add_command(label="ping [IP/Hostname] -t", command=lambda: self.open_cmd_tools_window("ping [Enter IP/Hostname] -t", show_input=True))
+        conn_test_menu.add_command(label="tracert google.com", command=lambda: self.open_cmd_tools_window("tracert google.com"))
+        conn_test_menu.add_command(label="pathping google.com", command=lambda: self.open_cmd_tools_window("pathping google.com"))
+        conn_test_menu.add_command(label="telnet [IP] [Port]", command=lambda: self.open_cmd_tools_window("telnet [Enter IP] [Enter Port]", show_input=True))
+
+
+        # Sub-menu: Network Connections & Ports
+        net_conn_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="Network Connections & Ports", menu=net_conn_menu)
+        net_conn_menu.add_command(label="netstat -an", command=lambda: self.open_cmd_tools_window("netstat -an"))
+        net_conn_menu.add_command(label="nslookup google.com", command=lambda: self.open_cmd_tools_window("nslookup google.com"))
+        net_conn_menu.add_command(label="getmac", command=lambda: self.open_cmd_tools_window("getmac"))
+        net_conn_menu.add_command(label="arp -a", command=lambda: self.open_cmd_tools_window("arp -a"))
+
+        # Sub-menu: Network Configuration
+        net_config_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="Network Configuration", menu=net_config_menu)
+        net_config_menu.add_command(label="netsh (Interactive)", command=lambda: self.open_cmd_tools_window("netsh")) # User will need to interact
+        net_config_menu.add_command(label="route print", command=lambda: self.open_cmd_tools_window("route print"))
+
+        # System Information & Process Management (Priority 2)
+        system_menu = Menu(self.cmd_tools_menubutton.menu, tearoff=0)
+        self.cmd_tools_menubutton.menu.add_cascade(label="System & Processes", menu=system_menu)
+        system_menu.add_command(label="systeminfo", command=lambda: self.open_cmd_tools_window("systeminfo"))
+        system_menu.add_command(label="tasklist", command=lambda: self.open_cmd_tools_window("tasklist"))
+        system_menu.add_command(label="taskkill /F /IM [Image Name]", command=lambda: self.open_cmd_tools_window("taskkill /F /IM [Enter Image Name]", show_input=True))
+        system_menu.add_command(label="sc query [Service Name]", command=lambda: self.open_cmd_tools_window("sc query [Enter Service Name]", show_input=True))
+        system_menu.add_command(label="driverquery", command=lambda: self.open_cmd_tools_window("driverquery"))
+        system_menu.add_command(label="powercfg /energy", command=lambda: self.open_cmd_tools_window("powercfg /energy"))
+
+    def open_cmd_tools_window(self, predefined_command="", show_input=False):
+        """
+        Opens a window containing CMD network commands.
+        Now uses a ttk.Notebook for categorization.
+        `predefined_command`: A command to pre-fill the input field.
+        `show_input`: If True, the input field will be shown.
+        """
+        cmd_window = tk.Toplevel(self.root)
+        cmd_window.title("CMD Network Tools")
+        cmd_window.transient(self.root)
+        cmd_window.grab_set()
+        cmd_window.geometry("800x600") # Set a reasonable size
+        cmd_window.columnconfigure(0, weight=1)
+        cmd_window.rowconfigure(0, weight=1)
+
+        main_frame = ttk.Frame(cmd_window, padding="10")
+        main_frame.grid(row=0, column=0, sticky="nsew")
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(1, weight=1) # Row for notebook
+
+        # Command Entry and Execute Button
+        cmd_input_frame = ttk.Frame(main_frame)
+        cmd_input_frame.grid(row=0, column=0, sticky="ew", pady=5)
+        cmd_input_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(cmd_input_frame, text="Command:").grid(row=0, column=0, padx=5, sticky="w")
+        self.cmd_entry_var = tk.StringVar(value=predefined_command)
+        cmd_entry = ttk.Entry(cmd_input_frame, textvariable=self.cmd_entry_var, width=80)
+        cmd_entry.grid(row=0, column=1, padx=5, sticky="ew")
+
+        execute_button = ttk.Button(
+            cmd_input_frame,
+            text="Execute",
+            command=lambda: self.cmd_executor.execute_command(self.cmd_entry_var.get())
+        )
+        execute_button.grid(row=0, column=2, padx=5)
+        
+        # Output Display Area
+        output_frame = ttk.LabelFrame(main_frame, text="Command Output", padding="10")
+        output_frame.grid(row=1, column=0, sticky="nsew", pady=10)
+        output_frame.columnconfigure(0, weight=1)
+        output_frame.rowconfigure(0, weight=1)
+
+        self.cmd_output_text = tk.Text(output_frame, wrap=tk.WORD, font=("Consolas", 10))
+        self.cmd_output_text.grid(row=0, column=0, sticky="nsew")
+        
+        output_scrollbar = ttk.Scrollbar(output_frame, orient=tk.VERTICAL, command=self.cmd_output_text.yview)
+        self.cmd_output_text.config(yscrollcommand=output_scrollbar.set)
+        output_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.cmd_output_text.config(state=tk.DISABLED) # Make it read-only initially
+        self.cmd_executor = CmdToolExecutor(self.cmd_output_text, self.root.after)
+
+        # Copy to Clipboard Button
+        copy_button = ttk.Button(
+            output_frame,
+            text="Copy Output",
+            command=self._copy_cmd_output_from_window
+        )
+        copy_button.grid(row=1, column=0, pady=5)
+
+        # Notebook for categorized commands
+        notebook = ttk.Notebook(main_frame)
+        notebook.grid(row=2, column=0, sticky="nsew", pady=10)
+        main_frame.rowconfigure(2, weight=1)
+
+        # Create tabs for each category (only Network & System remain)
+        self.network_tab = ttk.Frame(notebook, padding="10")
+        self.system_tab = ttk.Frame(notebook, padding="10")
+
+        notebook.add(self.network_tab, text="Network & Troubleshooting")
+        notebook.add(self.system_tab, text="System & Processes")
+
+        # Populate each tab with buttons
+        self._add_network_commands(self.network_tab)
+        self._add_system_commands(self.system_tab)
+
+        close_button = ttk.Button(cmd_window, text="Close", command=cmd_window.destroy)
+        close_button.grid(row=1, column=0, pady=10)
+
+        cmd_window.protocol("WM_DELETE_WINDOW", cmd_window.destroy)
+        cmd_window.wait_window()
+
+    def _add_command_button(self, parent_frame, text, command_str, row, col, show_input=False):
+        """Helper to create a button for a CMD command."""
+        btn = ttk.Button(parent_frame, text=text, 
+                         command=lambda: self.cmd_entry_var.set(command_str))
+        btn.grid(row=row, column=col, padx=5, pady=5, sticky="ew")
+
+    def _add_network_commands(self, parent_frame):
+        # Configure grid for even column distribution
+        for i in range(3): parent_frame.columnconfigure(i, weight=1)
+
+        # IP Configuration
+        ip_config_frame = ttk.LabelFrame(parent_frame, text="IP Configuration")
+        ip_config_frame.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        for i in range(3): ip_config_frame.columnconfigure(i, weight=1)
+        self._add_command_button(ip_config_frame, "ipconfig", "ipconfig", 0, 0)
+        self._add_command_button(ip_config_frame, "ipconfig /all", "ipconfig /all", 0, 1)
+        self._add_command_button(ip_config_frame, "ipconfig /renew", "ipconfig /renew", 0, 2)
+        self._add_command_button(ip_config_frame, "ipconfig /release", "ipconfig /release", 1, 0)
+
+        # Connectivity Test
+        conn_test_frame = ttk.LabelFrame(parent_frame, text="Connectivity Test")
+        conn_test_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        for i in range(3): conn_test_frame.columnconfigure(i, weight=1)
+        self._add_command_button(conn_test_frame, "ping google.com", "ping google.com -n 4", 0, 0)
+        self._add_command_button(conn_test_frame, "ping [IP/Hostname] -t", "ping [Enter IP/Hostname] -t", 0, 1, show_input=True)
+        self._add_command_button(conn_test_frame, "tracert google.com", "tracert google.com", 0, 2)
+        self._add_command_button(conn_test_frame, "pathping google.com", "pathping google.com", 1, 0)
+        self._add_command_button(conn_test_frame, "telnet [IP] [Port]", "telnet [Enter IP] [Enter Port]", 1, 1, show_input=True)
+
+
+        # Network Connections & Ports
+        net_conn_frame = ttk.LabelFrame(parent_frame, text="Network Connections & Ports")
+        net_conn_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        for i in range(3): net_conn_frame.columnconfigure(i, weight=1)
+        self._add_command_button(net_conn_frame, "netstat -an", "netstat -an", 0, 0)
+        self._add_command_button(net_conn_frame, "nslookup google.com", "nslookup google.com", 0, 1)
+        self._add_command_button(net_conn_frame, "getmac", "getmac", 0, 2)
+        self._add_command_button(net_conn_frame, "arp -a", "arp -a", 1, 0)
+
+        # Network Configuration & Routing
+        net_config_frame = ttk.LabelFrame(parent_frame, text="Network Configuration & Routing")
+        net_config_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        for i in range(3): net_config_frame.columnconfigure(i, weight=1)
+        self._add_command_button(net_config_frame, "netsh (Interactive)", "netsh", 0, 0) # User will need to interact
+        self._add_command_button(net_config_frame, "route print", "route print", 0, 1)
+        self._add_command_button(net_config_frame, "route add...", "route add [destination] mask [netmask] [gateway]", 1, 0, show_input=True)
+        self._add_command_button(net_config_frame, "route delete...", "route delete [destination]", 1, 1, show_input=True)
+
+    def _add_system_commands(self, parent_frame):
+        for i in range(3): parent_frame.columnconfigure(i, weight=1)
+
+        sys_info_frame = ttk.LabelFrame(parent_frame, text="System Information")
+        sys_info_frame.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        for i in range(3): sys_info_frame.columnconfigure(i, weight=1)
+        self._add_command_button(sys_info_frame, "systeminfo", "systeminfo", 0, 0)
+        self._add_command_button(sys_info_frame, "driverquery", "driverquery", 0, 1)
+        self._add_command_button(sys_info_frame, "powercfg /energy", "powercfg /energy", 0, 2)
+
+        process_mgmt_frame = ttk.LabelFrame(parent_frame, text="Process & Service Management")
+        process_mgmt_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        for i in range(3): process_mgmt_frame.columnconfigure(i, weight=1)
+        self._add_command_button(process_mgmt_frame, "tasklist", "tasklist", 0, 0)
+        self._add_command_button(process_mgmt_frame, "taskkill /F /IM [Name]", "taskkill /F /IM [Enter Image Name]", 0, 1, show_input=True)
+        self._add_command_button(process_mgmt_frame, "sc query [Service]", "sc query [Enter Service Name]", 0, 2, show_input=True)
+        self._add_command_button(process_mgmt_frame, "sc start [Service]", "sc start [Enter Service Name]", 1, 0, show_input=True)
+        self._add_command_button(process_mgmt_frame, "sc stop [Service]", "sc stop [Enter Service Name]", 1, 1, show_input=True)
+        self._add_command_button(process_mgmt_frame, "net start [Service]", "net start [Enter Service Name]", 2, 0, show_input=True)
+        self._add_command_button(process_mgmt_frame, "net stop [Service]", "net stop [Enter Service Name]", 2, 1, show_input=True)
+
+        event_log_frame = ttk.LabelFrame(parent_frame, text="Event Log & Tracing")
+        event_log_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
+        for i in range(3): event_log_frame.columnconfigure(i, weight=1)
+        self._add_command_button(event_log_frame, "wevtutil qe System", "wevtutil qe System /c:10 /f:text", 0, 0) # Example query
+        self._add_command_button(event_log_frame, "logman query", "logman query", 0, 1)
+
+    def _copy_cmd_output_from_window(self):
+        """Copies the content of the CMD output text widget in the tools window to the clipboard."""
+        output_content = self.cmd_output_text.get(1.0, tk.END).strip()
+        if output_content:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(output_content)
+            messagebox.showinfo("Copied", "Command output copied to clipboard.", parent=self.cmd_output_text.winfo_toplevel())
+        else:
+            messagebox.showwarning("Warning", "No output to copy.", parent=self.cmd_output_text.winfo_toplevel())
 
     def start_search(self):
         if not self.scanning_active:
@@ -938,6 +1214,10 @@ class RealTimeNetworkScanner:
                 
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     if self.stop_flag:
+                        # Cancel remaining futures if stop_flag is set
+                        for fut in futures:
+                            if not fut.done():
+                                fut.cancel()
                         break
                     
                     ip = futures[future]
@@ -965,6 +1245,8 @@ class RealTimeNetworkScanner:
                             )
                             self.root.after(0, self.add_device, device)
                     
+                    except concurrent.futures.CancelledError:
+                        print(f"Scan for {ip} was cancelled.")
                     except Exception as e:
                         pass # Ignore errors from individual IP scans
                     
@@ -985,7 +1267,7 @@ class RealTimeNetworkScanner:
     def scan_ip(self, ip_str):
         """Scans a single IP (for parallel execution)."""
         if self.stop_flag:
-            return None
+            raise concurrent.futures.CancelledError("Scan stopped by user.")
             
         response = ping(ip_str, timeout=0.3)
         if response is not None and response:
@@ -1062,6 +1344,19 @@ class RealTimeNetworkScanner:
             if len(values) >= 6: # Ensure column exists
                 values[5] = ports_str # Index 5 is 'Open Ports'
                 self.tree.item(item_id, values=values)
+
+    def _update_hover_window_error(self, thread_id, message):
+        """Updates the hover window with an error message."""
+        if thread_id != self.last_hover_thread_id or not self.hover_window:
+            return
+
+        if self.hover_image_label:
+            self.hover_image_label.config(text=message)
+        else:
+            error_label = ttk.Label(self.hover_window, text=message)
+            error_label.pack(padx=5, pady=5)
+        self.hover_window.update_idletasks()
+        self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}")
 
     def update_camera_info(self, item_id, cred_set_name, rtsp_url, camera_status, snapshot_uri):
         """Updates camera information in the UI, now with adjusted indices."""
@@ -1284,20 +1579,6 @@ class RealTimeNetworkScanner:
         image_label.pack()
         self.hover_window.update_idletasks()
         self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}")
-
-    def _update_hover_window_error(self, thread_id, message):
-        """Updates the hover window with an error message."""
-        if thread_id != self.last_hover_thread_id or not self.hover_window:
-            return
-
-        if self.hover_image_label:
-            self.hover_image_label.config(text=message)
-        else:
-            error_label = ttk.Label(self.hover_window, text=message)
-            error_label.pack(padx=5, pady=5)
-        self.hover_window.update_idletasks()
-        self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}")
-
 
 if __name__ == "__main__":
     root = tk.Tk()

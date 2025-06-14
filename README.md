@@ -2,7 +2,7 @@
 
 # اسکنر شبکه - ابزار کشف دوربین‌های ONVIF
 
-![Network Scanner](https://intellsoft.ir/wp-content/uploads/2024/06/network-scanner-banner.jpg)
+![Network Scanner](https://lh3.googleusercontent.com/d/1IZMiReIzlq9Ed6IEhG6tVhbh_AvIvm8I)
 
 **یک راهکار هوشمند برای مدیریت و کشف خودکار دوربین‌های مداربسته در شبکه**
 
@@ -63,7 +63,7 @@ This advanced software helps security and network professionals to:
 
 ## System Requirements
 - Python 3.7+
-- Windows/Linux/macOS
+- Windows
 - Network access to target devices
 
 ## Installation
