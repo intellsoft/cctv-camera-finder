@@ -1,4 +1,3 @@
-# search.py
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, Menu
 import subprocess
@@ -20,11 +19,12 @@ from urllib.parse import urlparse
 import webbrowser
 import platform
 from zeroconf import ServiceBrowser, Zeroconf, ServiceListener
-# from getmac import get_mac_address # Keep if MAC address is still desired without vendor lookup
+from getmac import get_mac_address
+import re
+import cv2
 
 # --- New Imports for Updates ---
 from ttkthemes import ThemedTk
-# from mac_vendor_lookup import MacLookup # Removed
 
 # Global variable for the fixed encryption key
 FIXED_ENCRYPTION_KEY = b'v8VZkq4W9E7RjTzOYKbLwSdXyGfChN3s1Mn2PpI0Qt6='
@@ -41,11 +41,7 @@ class BonjourListener(ServiceListener):
             if addresses:
                 ip = addresses[0]
                 port = info.port
-                # hostname = info.server # Hostname removed
-                # Remove trailing dot from hostname if present
-                # if hostname.endswith('.'):
-                #     hostname = hostname[:-1]
-                self.app.add_bonjour_device(ip, port) # Pass only ip and port
+                self.app.add_bonjour_device(ip, port)
                 
     def remove_service(self, zc, type_, name):
         pass
@@ -82,11 +78,11 @@ class CmdToolExecutor:
             )
             output = process.stdout
             error_output = process.stderr
-            self.root.after(0, self._update_output_gui, output, error_output)
+            self.root_after(0, self._update_output_gui, output, error_output)
         except subprocess.TimeoutExpired:
-            self.root.after(0, self._update_output_gui, f"Command '{command}' timed out after 60 seconds.", "", is_error=True)
+            self.root_after(0, self._update_output_gui, f"Command '{command}' timed out after 60 seconds.", "", is_error=True)
         except Exception as e:
-            self.root.after(0, self._update_output_gui, f"Error executing command: {e}", "", is_error=True)
+            self.root_after(0, self._update_output_gui, f"Error executing command: {e}", "", is_error=True)
 
     def _update_output_gui(self, output, error_output="", clear_previous=False, is_error=False):
         self.output_widget.config(state=tk.NORMAL)
@@ -114,13 +110,17 @@ class RealTimeNetworkScanner:
         self.scanning_active = False
         self.found_count = 0
         
+        # تبلیغات چرخشی
+        self.ads = [
+            {"text": "نرم افزار تبدیل عکس به فیلم تایم لپس", "url": "https://intellsoft.ir/product/time-lapse-photo-to-video/"},
+            {"text": "نرم افزار تبدیل فیلم دوربین مداربسته تایم لپس", "url": "https://intellsoft.ir/product/time-lapse-software-with-cctv-playback-film/"},
+            {"text": "نرم افزار تایم لپس دوربین مداربسته", "url": "https://intellsoft.ir/product/timelapse-camera-recorder/"}
+        ]
+        self.current_ad_index = 0
+        
         # Bonjour variables
         self.zeroconf = None
         self.bonjour_listener = None
-        
-        # --- New: Vendor Lookup --- (Removed)
-        # self.mac_lookup = MacLookup() # Removed
-        # self.vendor_nodes = {} # To store vendor parent nodes in treeview for grouping (Removed)
         
         # Floating message setup
         self.floating_message = ttk.Label(
@@ -166,7 +166,7 @@ class RealTimeNetworkScanner:
             print(f"Could not create camera icon: {e}")
             self.camera_icon = None
 
-        # Hover image related variables
+        # Hover image related variables (FIXED)
         self.hover_window = None
         self.hover_image_label = None
         self.current_hover_item = None
@@ -191,6 +191,23 @@ class RealTimeNetworkScanner:
         self.create_widgets()
         self.setup_style()
         self.start_worker_threads()
+        
+        # Start ad rotation
+        self.update_advertisement()
+
+    def update_advertisement(self):
+        """Updates the advertisement every 5 seconds"""
+        if not hasattr(self, 'ad_label'):
+            return
+            
+        ad = self.ads[self.current_ad_index]
+        self.ad_label.config(text=ad["text"])
+        
+        # Update index for next ad
+        self.current_ad_index = (self.current_ad_index + 1) % len(self.ads)
+        
+        # Schedule next update
+        self.root.after(5000, self.update_advertisement)
 
     def center_window(self, window):
         """Centers a window on the screen"""
@@ -304,7 +321,9 @@ class RealTimeNetworkScanner:
         """ONVIF discovery worker."""
         while True:
             ip, item_id = self.onvif_queue.get()
-            if self.stop_flag or not self.tree.exists(item_id):
+            # GEMINI FIX: Removed self.tree.exists(item_id) check from this background thread.
+            # The check is correctly performed in update_camera_info which runs in the main thread.
+            if self.stop_flag:
                 self.onvif_queue.task_done()
                 continue
                 
@@ -340,7 +359,9 @@ class RealTimeNetworkScanner:
         """Port scanning worker."""
         while True:
             ip, item_id = self.port_scan_queue.get()
-            if self.stop_flag or not self.tree.exists(item_id):
+            # GEMINI FIX: Removed self.tree.exists(item_id) check from this background thread.
+            # The check is correctly performed in update_open_ports which runs in the main thread.
+            if self.stop_flag:
                 self.port_scan_queue.task_done()
                 continue
             
@@ -380,6 +401,7 @@ class RealTimeNetworkScanner:
         rtsp_url = ""
         snapshot_uri = ""
         try:
+            # خط اصلاح شده
             cam = ONVIFCamera(ip, 80, username, password)
             media_service = cam.create_media_service()
             profiles = media_service.GetProfiles()
@@ -388,14 +410,13 @@ class RealTimeNetworkScanner:
             
             token = profiles[0].token
             stream_uri = media_service.GetStreamUri({
-                'StreamSetup': {'Stream': 'RTP-Unicast', 'Transport': 'RTSP'},
+                'StreamSetup': {'Stream': 'RTP-Unicast', 'Transport': {'Protocol': 'RTSP'}},
                 'ProfileToken': token
             })
             rtsp_url = stream_uri.Uri
 
             try:
-                imaging_service = cam.create_imaging_service()
-                snapshot_uri_response = imaging_service.GetSnapshotUri({'ProfileToken': token})
+                snapshot_uri_response = media_service.GetSnapshotUri({'ProfileToken': token})
                 snapshot_uri = snapshot_uri_response.Uri
             except Exception as e:
                 print(f"Error getting Snapshot URI for {ip}: {e}")
@@ -420,12 +441,10 @@ class RealTimeNetworkScanner:
         self.style.configure('camera_error.TLabel', background='#ffcccc')
         self.style.configure('bonjour_device.TLabel', background='#cce5ff')
         self.style.configure('mac_dup.TLabel', background='#ffcc99')
-        # Style for top-level vendor groups (Removed)
-        # self.style.configure('group.TLabel', font=('TkDefaultFont', 9, 'bold'))
+        self.style.configure('advertisement.TLabel', background='#e6f7ff', foreground='#0066cc', font=('Tahoma', 10, 'bold'))
 
 
     def create_widgets(self):
-        # --- New: Main Menu ---
         self.create_main_menu()
         
         main_frame = ttk.Frame(self.root)
@@ -471,13 +490,6 @@ class RealTimeNetworkScanner:
         )
         self.manage_scan_range_btn.pack(side=tk.LEFT, padx=5)
 
-        self.cmd_tools_btn = ttk.Button(
-            control_frame,
-            text="CMD Tools",
-            command=self.open_cmd_tools_window
-        )
-        self.cmd_tools_btn.pack(side=tk.LEFT, padx=5)
-
         # Camera Credentials Selection Frame
         cred_selection_frame = ttk.Frame(control_frame)
         cred_selection_frame.pack(side=tk.RIGHT, padx=10)
@@ -501,11 +513,24 @@ class RealTimeNetworkScanner:
         )
         self.apply_cred_btn.pack(side=tk.LEFT, padx=5)
 
+        # CMD Tools Menubutton (FIXED: Added dropdown menu)
+        self.cmd_tools_menubutton = ttk.Menubutton(
+            control_frame,
+            text="CMD Tools"
+        )
+        self.cmd_tools_menubutton.pack(side=tk.LEFT, padx=5)
+        
+        # Create the dropdown menu
+        self.cmd_tools_menu = Menu(self.cmd_tools_menubutton, tearoff=0)
+        self.cmd_tools_menubutton["menu"] = self.cmd_tools_menu
+        
+        # Add categories and commands to the menu
+        self._create_cmd_tool_menus()
+
         # Progress Section
         self.progress_frame = ttk.Frame(main_frame)
         self.progress_frame.pack(fill=tk.X, pady=5)
         
-        # --- New: Search/Filter Box ---
         search_frame = ttk.Frame(self.progress_frame)
         search_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Label(search_frame, text="Search:").pack(side=tk.LEFT)
@@ -528,32 +553,22 @@ class RealTimeNetworkScanner:
         self.progress_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True)
         self.progress_bar.pack_forget()
 
-        # Results Treeview (Modified for Grouping)
+        # Results Treeview
         tree_frame = ttk.Frame(main_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        # New "Vendor" column added (Removed)
         columns = ('IP', 'MAC', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
-        self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings') # Changed to show='headings'
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
         
         col_widths = {
             'IP': 120, 
             'MAC': 130, 
-            # 'Hostname': 150, # Removed
-            # 'Vendor': 150, # Removed
             'Credential Set': 120,
             'Open Ports': 120,
             'RTSP URL': 200,
             'Camera Status': 120,
             'Snapshot': 80
         }
-        
-        # We create the headings but the tree itself will only show top-level groups initially (Removed)
-        # self.tree.heading("#0", text="Group / Vendor", anchor='w') # Removed
-        # self.tree.column("#0", width=200, anchor='w') # Removed
-
-        # Redefine the tree to show both headings and the grouping column (Removed)
-        # self.tree.configure(show='tree headings') # Removed, now just 'headings'
 
         for col in columns:
             self.tree.heading(col, text=col, command=lambda c=col: self.sort_treeview_column(c, False))
@@ -575,9 +590,25 @@ class RealTimeNetworkScanner:
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", self._on_tree_leave)
 
+        # تبلیغات چرخشی
+        ad_frame = ttk.Frame(self.root, relief=tk.RAISED, borderwidth=1)
+        ad_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
+        
+        # Add a label for the advertisement
+        self.ad_label = ttk.Label(
+            ad_frame, 
+            text="", 
+            style='advertisement.TLabel',
+            cursor="hand2",
+            anchor=tk.CENTER,
+            padding=5
+        )
+        self.ad_label.pack(fill=tk.X, expand=True)
+        self.ad_label.bind("<Button-1>", self.on_ad_click)
+        
         # Footer Section
         footer_frame = ttk.Frame(self.root)
-        footer_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+        footer_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 5))
 
         footer_text_part1 = "برنامه نویس : محمد علی عباسپور    "
         website_text = "intellsoft.ir"
@@ -604,6 +635,11 @@ class RealTimeNetworkScanner:
         self.footer_text_widget.tag_bind("link", "<Enter>", self._on_link_enter)
         self.footer_text_widget.tag_bind("link", "<Leave>", self._on_link_leave)
         self.footer_text_widget.config(state="disabled")
+        
+    def on_ad_click(self, event):
+        """Handles click on advertisement"""
+        current_ad = self.ads[self.current_ad_index]
+        webbrowser.open_new(current_ad["url"])
         
     def create_main_menu(self):
         menubar = Menu(self.root)
@@ -668,10 +704,9 @@ class RealTimeNetworkScanner:
             self.zeroconf = None
             self.show_floating_message("Bonjour scan stopped")
             
-    def add_bonjour_device(self, ip, port): # Removed hostname parameter
+    def add_bonjour_device(self, ip, port):
         """Adds a Bonjour device to the table"""
         existing = False
-        # The logic for parent_node (vendor grouping) is removed as the tree is flat now.
         for child in self.tree.get_children():
             if self.tree.item(child, 'values')[0] == ip:
                 existing = True
@@ -681,17 +716,14 @@ class RealTimeNetworkScanner:
             device = {
                 "IP": ip,
                 "MAC": "N/A (Bonjour)",
-                # "Hostname": hostname, # Removed
-                # "Vendor": "Bonjour Device", # Removed
                 "Credential Set": "Default Admin",
                 "Open Ports": str(port),
                 "RTSP URL": "",
                 "Camera Status": "Bonjour Device",
                 "Snapshot": "Unavailable"
             }
-            # Since we don't have a MAC, we group it under a special vendor name (Comment removed as grouping is removed)
             item_id = self.add_device_to_tree(device)
-            self.root.after(0, self.update_status, f"Bonjour device found: ({ip})") # Removed hostname from status message
+            self.root.after(0, self.update_status, f"Bonjour device found: ({ip})")
             self.onvif_queue.put((ip, item_id))
             self.port_scan_queue.put((ip, item_id))
 
@@ -699,15 +731,11 @@ class RealTimeNetworkScanner:
         item_id = self.tree.identify_row(event.y)
         if not item_id: return
         
-        # Check if it's a parent node or a child node (Removed as grouping is removed)
-        # if self.tree.parent(item_id) == "": # This is a parent (vendor) node
-        #     return # Or show a menu specific to the group
-        
         column_id = self.tree.identify_column(event.x)
         if not column_id: return
 
         col_index = int(column_id.replace('#', '')) - 1
-        columns = ('IP', 'MAC', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot') # Updated columns
+        columns = ('IP', 'MAC', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
         column_name = columns[col_index] if 0 <= col_index < len(columns) else None
 
         if not column_name: return
@@ -724,8 +752,7 @@ class RealTimeNetworkScanner:
         self.show_floating_message(f"'{text}' copied to clipboard")
 
     def export_to_excel(self):
-        # The loop iterates over all items in the tree, which will now be flat
-        if not self.tree.get_children(): # Simplified check as no parent nodes exist
+        if not self.tree.get_children():
             self.show_floating_message("No data to export")
             return
 
@@ -742,11 +769,9 @@ class RealTimeNetworkScanner:
             sheet = workbook.active
             sheet.title = "Network Scan Results"
 
-            # This will correctly get the new headers
             headers = [self.tree.heading(col)['text'] for col in self.tree['columns']]
             sheet.append(headers)
 
-            # Iterate directly over all children, as there are no parent groups now
             for item_id in self.tree.get_children(): 
                 values = self.tree.item(item_id, 'values')
                 sheet.append(values)
@@ -771,9 +796,6 @@ class RealTimeNetworkScanner:
             return
             
         item = selected[0]
-        # Ignore if a parent group is selected (Removed as grouping is removed)
-        # if self.tree.parent(item) == "": return
-
         values = self.tree.item(item, 'values')
         ip = values[0]
         
@@ -786,7 +808,6 @@ class RealTimeNetworkScanner:
         self.save_camera_data()
             
         new_values = list(values)
-        # The index for 'Credential Set' is now 2 (0:IP, 1:MAC, 2:Credential Set)
         if len(new_values) >= 3: 
             new_values[2] = selected_cred_set_name
             self.tree.item(item, values=new_values)
@@ -799,8 +820,6 @@ class RealTimeNetworkScanner:
         selected = self.tree.selection()
         if selected:
             item = selected[0]
-            # Ignore if a parent group is selected (Removed as grouping is removed)
-            # if self.tree.parent(item) == "": return
             values = self.tree.item(item, 'values')
             ip = values[0]
             associated_cred_set = self.camera_ip_to_cred_set.get(ip, "Default Admin")
@@ -919,12 +938,11 @@ class RealTimeNetworkScanner:
                     return
                 for ip in cameras_using_this_set:
                     self.camera_ip_to_cred_set[ip] = "Default Admin"
-                # Updated index for Credential Set
-                for item_id in self.tree.get_children(): 
-                    if self.tree.item(item_id, 'values')[0] == ip:
-                        current_values = list(self.tree.item(item_id, 'values'))
-                        current_values[2] = "Default Admin" # Adjusted index
-                        self.tree.item(item_id, values=current_values)
+                    for item_id in self.tree.get_children(): 
+                        if self.tree.item(item_id, 'values')[0] == ip:
+                            current_values = list(self.tree.item(item_id, 'values'))
+                            current_values[2] = "Default Admin"
+                            self.tree.item(item_id, values=current_values)
 
             del self.credential_sets[name_to_delete]
             self.save_camera_data()
@@ -959,7 +977,7 @@ class RealTimeNetworkScanner:
                 values = cred_tree.item(selected[0], 'values')
                 cred_name_var.set(values[0])
                 cred_username_var.set(values[1])
-                cred_password_var.set("") # Do not display password directly
+                cred_password_var.set("") 
 
         cred_tree.bind('<<TreeviewSelect>>', on_cred_tree_select)
 
@@ -1033,44 +1051,256 @@ class RealTimeNetworkScanner:
         range_manager_window.protocol("WM_DELETE_WINDOW", range_manager_window.destroy)
         range_manager_window.wait_window()
 
-    def open_cmd_tools_window(self):
+    # FIXED: Added CMD Tools dropdown menu functionality
+    def _create_cmd_tool_menus(self):
+        """Creates the dropdown menus for CMD Tools."""
+        # Network and Troubleshooting (Priority 1)
+        network_menu = Menu(self.cmd_tools_menu, tearoff=0)
+        self.cmd_tools_menu.add_cascade(label="Network & Troubleshooting", menu=network_menu)
+        
+        # Sub-menu: IP Configuration
+        ip_config_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="IP Configuration", menu=ip_config_menu)
+        ip_config_menu.add_command(label="ipconfig", command=lambda: self.open_cmd_tools_window("ipconfig"))
+        ip_config_menu.add_command(label="ipconfig /all", command=lambda: self.open_cmd_tools_window("ipconfig /all"))
+        ip_config_menu.add_command(label="ipconfig /renew", command=lambda: self.open_cmd_tools_window("ipconfig /renew"))
+        ip_config_menu.add_command(label="ipconfig /release", command=lambda: self.open_cmd_tools_window("ipconfig /release"))
+
+        # Sub-menu: Connectivity Test
+        conn_test_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="Connectivity Test", menu=conn_test_menu)
+        conn_test_menu.add_command(label="ping google.com", command=lambda: self.open_cmd_tools_window("ping google.com -n 4"))
+        conn_test_menu.add_command(label="ping [IP/Hostname] -t", command=lambda: self.open_cmd_tools_window("ping [Enter IP/Hostname] -t", show_input=True))
+        conn_test_menu.add_command(label="tracert google.com", command=lambda: self.open_cmd_tools_window("tracert google.com"))
+        conn_test_menu.add_command(label="pathping google.com", command=lambda: self.open_cmd_tools_window("pathping google.com"))
+        conn_test_menu.add_command(label="telnet [IP] [Port]", command=lambda: self.open_cmd_tools_window("telnet [Enter IP] [Enter Port]", show_input=True))
+
+
+        # Sub-menu: Network Connections & Ports
+        net_conn_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="Network Connections & Ports", menu=net_conn_menu)
+        net_conn_menu.add_command(label="netstat -an", command=lambda: self.open_cmd_tools_window("netstat -an"))
+        net_conn_menu.add_command(label="nslookup google.com", command=lambda: self.open_cmd_tools_window("nslookup google.com"))
+        net_conn_menu.add_command(label="getmac", command=lambda: self.open_cmd_tools_window("getmac"))
+        net_conn_menu.add_command(label="arp -a", command=lambda: self.open_cmd_tools_window("arp -a"))
+
+        # Sub-menu: Network Configuration
+        net_config_menu = Menu(network_menu, tearoff=0)
+        network_menu.add_cascade(label="Network Configuration", menu=net_config_menu)
+        net_config_menu.add_command(label="netsh (Interactive)", command=lambda: self.open_cmd_tools_window("netsh")) # User will need to interact
+        net_config_menu.add_command(label="route print", command=lambda: self.open_cmd_tools_window("route print"))
+
+        # System Information & Process Management (Priority 2)
+        system_menu = Menu(self.cmd_tools_menu, tearoff=0)
+        self.cmd_tools_menu.add_cascade(label="System & Processes", menu=system_menu)
+        system_menu.add_command(label="systeminfo", command=lambda: self.open_cmd_tools_window("systeminfo"))
+        system_menu.add_command(label="tasklist", command=lambda: self.open_cmd_tools_window("tasklist"))
+        system_menu.add_command(label="taskkill /F /IM [Image Name]", command=lambda: self.open_cmd_tools_window("taskkill /F /IM [Enter Image Name]", show_input=True))
+        system_menu.add_command(label="sc query [Service Name]", command=lambda: self.open_cmd_tools_window("sc query [Enter Service Name]", show_input=True))
+        system_menu.add_command(label="driverquery", command=lambda: self.open_cmd_tools_window("driverquery"))
+        system_menu.add_command(label="powercfg /energy", command=lambda: self.open_cmd_tools_window("powercfg /energy"))
+
+        # Add separator and full window option
+        self.cmd_tools_menu.add_separator()
+        self.cmd_tools_menu.add_command(label="Open Full CMD Tools Window", command=self.open_cmd_tools_window)
+
+    # FIXED: Added show_input parameter to handle commands requiring input
+    def open_cmd_tools_window(self, predefined_command="", show_input=False):
+        """
+        Opens a window containing CMD network commands.
+        Now accepts a predefined command and shows input field if needed.
+        """
         cmd_window = tk.Toplevel(self.root)
         cmd_window.title("CMD Tools")
         self.center_window(cmd_window)
         cmd_window.transient(self.root)
         cmd_window.grab_set()
-
-        cmd_frame = ttk.Frame(cmd_window, padding="10")
-        cmd_frame.pack(fill=tk.BOTH, expand=True)
-
-        ttk.Label(cmd_frame, text="Enter Command:").pack(padx=5, pady=5, anchor='w')
-        command_entry = ttk.Entry(cmd_frame, width=80)
-        command_entry.pack(fill=tk.X, padx=5, pady=5)
-
-        output_text = tk.Text(cmd_frame, wrap="word", height=15, state=tk.DISABLED, bg="black", fg="white", font=("Courier New", 9))
-        output_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        cmd_executor = CmdToolExecutor(output_text, self.root.after)
-
-        def execute():
-            command = command_entry.get().strip()
-            if command:
-                cmd_executor.execute_command(command)
-            else:
-                output_text.config(state=tk.NORMAL)
-                output_text.delete(1.0, tk.END)
-                output_text.insert(tk.END, "Please enter a command.")
-                output_text.config(state=tk.DISABLED)
-
-        button_frame = ttk.Frame(cmd_frame)
+        
+        # Set minimum size
+        cmd_window.minsize(600, 400)
+        
+        # Main frame
+        main_frame = ttk.Frame(cmd_window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Command entry frame
+        cmd_entry_frame = ttk.Frame(main_frame)
+        cmd_entry_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(cmd_entry_frame, text="Command:").pack(side=tk.LEFT, padx=5)
+        
+        cmd_entry_var = tk.StringVar(value=predefined_command)
+        cmd_entry = ttk.Entry(cmd_entry_frame, textvariable=cmd_entry_var, width=70)
+        cmd_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        # If show_input is True, replace placeholders with actual input fields
+        if show_input:
+            cmd_entry.bind("<FocusIn>", lambda e: self._handle_command_placeholders(cmd_entry, cmd_entry_var))
+        
+        execute_btn = ttk.Button(
+            cmd_entry_frame, 
+            text="Execute", 
+            command=lambda: self._execute_cmd_tool(cmd_output_text, cmd_entry_var.get())
+        )
+        execute_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Output frame
+        output_frame = ttk.LabelFrame(main_frame, text="Output")
+        output_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # Create text widget with scrollbar
+        cmd_output_text = tk.Text(output_frame, wrap=tk.WORD, state=tk.DISABLED)
+        cmd_output_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        scrollbar = ttk.Scrollbar(output_frame, command=cmd_output_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        cmd_output_text.config(yscrollcommand=scrollbar.set)
+        
+        # Button frame
+        button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X, pady=5)
-
-        ttk.Button(button_frame, text="Execute", command=execute).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Clear Output", command=lambda: output_text.config(state=tk.NORMAL) or output_text.delete(1.0, tk.END) or output_text.config(state=tk.DISABLED)).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Close", command=cmd_window.destroy).pack(side=tk.RIGHT, padx=5)
+        
+        clear_btn = ttk.Button(
+            button_frame,
+            text="Clear Output",
+            command=lambda: self._clear_cmd_output(cmd_output_text)
+        )
+        clear_btn.pack(side=tk.LEFT, padx=5)
+        
+        copy_btn = ttk.Button(
+            button_frame,
+            text="Copy Output",
+            command=lambda: self._copy_cmd_output(cmd_output_text)
+        )
+        copy_btn.pack(side=tk.LEFT, padx=5)
+        
+        close_btn = ttk.Button(
+            button_frame,
+            text="Close",
+            command=cmd_window.destroy
+        )
+        close_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Focus on entry field
+        cmd_entry.focus_set()
         
         cmd_window.protocol("WM_DELETE_WINDOW", cmd_window.destroy)
-        cmd_window.wait_window()
+
+    def _handle_command_placeholders(self, cmd_entry, cmd_entry_var):
+        """Replaces placeholders in command with actual input fields."""
+        command = cmd_entry_var.get()
+        if "[Enter" in command:
+            # Create a dialog to get the values
+            input_dialog = tk.Toplevel(self.root)
+            input_dialog.title("Enter Command Parameters")
+            self.center_window(input_dialog)
+            input_dialog.transient(self.root)
+            input_dialog.grab_set()
+            
+            # Find all placeholders
+            placeholders = re.findall(r'\[([^\]]+)\]', command)
+            entries = {}
+            row = 0
+            
+            for placeholder in placeholders:
+                ttk.Label(input_dialog, text=f"{placeholder}:").grid(row=row, column=0, padx=5, pady=2, sticky="e")
+                entry_var = tk.StringVar()
+                entry = ttk.Entry(input_dialog, textvariable=entry_var, width=30)
+                entry.grid(row=row, column=1, padx=5, pady=2, sticky="w")
+                entries[placeholder] = entry_var
+                row += 1
+            
+            def apply_values():
+                new_command = command
+                for placeholder, var in entries.items():
+                    value = var.get()
+                    if value:
+                        new_command = new_command.replace(f"[{placeholder}]", value)
+                cmd_entry_var.set(new_command)
+                input_dialog.destroy()
+                cmd_entry.focus_set()
+            
+            button_frame = ttk.Frame(input_dialog)
+            button_frame.grid(row=row, column=0, columnspan=2, pady=10)
+            
+            ttk.Button(button_frame, text="Apply", command=apply_values).pack(side=tk.LEFT, padx=5)
+            ttk.Button(button_frame, text="Cancel", command=input_dialog.destroy).pack(side=tk.LEFT, padx=5)
+            
+            input_dialog.wait_window()
+
+    def _execute_cmd_tool(self, output_widget, command):
+        """Executes a command and displays output."""
+        if not command:
+            self.show_floating_message("Please enter a command")
+            return
+            
+        output_widget.config(state=tk.NORMAL)
+        output_widget.delete(1.0, tk.END)
+        output_widget.insert(tk.END, f"Executing: {command}\n\n")
+        output_widget.see(tk.END)
+        output_widget.config(state=tk.DISABLED)
+        
+        # Execute command in a separate thread
+        threading.Thread(
+            target=self._run_cmd_in_thread, 
+            args=(output_widget, command),
+            daemon=True
+        ).start()
+
+    def _run_cmd_in_thread(self, output_widget, command):
+        """Runs command in a background thread and updates UI."""
+        try:
+            creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+            process = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=False,
+                encoding='utf-8',
+                errors='replace',
+                creationflags=creation_flags,
+                timeout=60
+            )
+            output = process.stdout
+            error_output = process.stderr
+            
+            # Update UI in main thread
+            self.root.after(0, self._update_cmd_output, output_widget, output, error_output)
+        except subprocess.TimeoutExpired:
+            self.root.after(0, self._update_cmd_output, output_widget, "", f"Command timed out after 60 seconds", True)
+        except Exception as e:
+            self.root.after(0, self._update_cmd_output, output_widget, "", f"Error: {str(e)}", True)
+
+    def _update_cmd_output(self, output_widget, output, error_output="", is_error=False):
+        """Updates the command output widget."""
+        output_widget.config(state=tk.NORMAL)
+        output_widget.insert(tk.END, output)
+        
+        if error_output:
+            output_widget.insert(tk.END, f"\n\n--- ERROR ---\n{error_output}")
+        
+        if is_error:
+            output_widget.tag_configure("error", foreground="red")
+            output_widget.insert(tk.END, "\n\n--- COMMAND FAILED ---\n", "error")
+        
+        output_widget.see(tk.END)
+        output_widget.config(state=tk.DISABLED)
+
+    def _clear_cmd_output(self, output_widget):
+        """Clears the command output."""
+        output_widget.config(state=tk.NORMAL)
+        output_widget.delete(1.0, tk.END)
+        output_widget.config(state=tk.DISABLED)
+
+    def _copy_cmd_output(self, output_widget):
+        """Copies command output to clipboard."""
+        output_widget.config(state=tk.NORMAL)
+        content = output_widget.get(1.0, tk.END)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        output_widget.config(state=tk.DISABLED)
+        self.show_floating_message("Output copied to clipboard")
 
     def start_search(self):
         if self.scanning_active:
@@ -1081,7 +1311,6 @@ class RealTimeNetworkScanner:
         self.scanning_active = True
         self.found_count = 0
         self.tree.delete(*self.tree.get_children())
-        # self.vendor_nodes.clear() # Removed
         self.progress_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True)
         self.update_status("Starting network scan...")
         self.search_btn.config(state=tk.DISABLED)
@@ -1119,15 +1348,15 @@ class RealTimeNetworkScanner:
         total_ips = end_ip - start_ip + 1
         scanned_ips = 0
 
-        max_workers = 50 # Adjust as needed
+        max_workers = 100 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(self._ping_ip, ipaddress.IPv4Address(i)): i for i in range(start_ip, end_ip + 1)}
+            futures = {executor.submit(self._ping_ip, str(ipaddress.IPv4Address(i))): str(ipaddress.IPv4Address(i)) for i in range(start_ip, end_ip + 1)}
             
             for future in concurrent.futures.as_completed(futures):
                 if self.stop_flag:
                     break
-                ip_int = futures[future]
-                scanned_ip_str = str(ipaddress.IPv4Address(ip_int))
+                
+                scanned_ip_str = futures[future]
                 scanned_ips += 1
                 progress_value = (scanned_ips / total_ips) * 100
                 self.root.after(0, self.update_progress, progress_value, f"Scanning: {scanned_ip_str}")
@@ -1135,15 +1364,9 @@ class RealTimeNetworkScanner:
                 try:
                     mac_address = future.result()
                     if mac_address:
-                        # Hostname and Vendor lookup removed
-                        # hostname = self.get_hostname(scanned_ip_str)
-                        # vendor = self.get_mac_vendor(mac_address)
-                        
                         device_data = {
                             "IP": scanned_ip_str,
                             "MAC": mac_address,
-                            # "Hostname": hostname, # Removed
-                            # "Vendor": vendor, # Removed
                             "Credential Set": "Default Admin",
                             "Open Ports": "Scanning...",
                             "RTSP URL": "N/A",
@@ -1159,50 +1382,40 @@ class RealTimeNetworkScanner:
     def _ping_ip(self, ip_address):
         """Pings an IP address and returns MAC if successful, None otherwise."""
         try:
-            # ping3 returns float latency or False
-            response = ping(str(ip_address), timeout=0.5, unit='ms')
-            if response is not False:
-                # get_mac_address is OS-dependent and can be slow/fail
-                # You might need to adjust this based on your environment
-                mac = get_mac_address(ip=str(ip_address))
+            response = ping(ip_address, timeout=0.5, unit='ms')
+            if response is not False and response is not None:
+                mac = get_mac_address(ip=ip_address)
                 return mac if mac else "Unknown"
         except Exception:
-            pass # Ping failed or MAC lookup failed
+            pass
         return None
 
     def get_hostname(self, ip_address):
         """Attempts to resolve hostname from IP address."""
         try:
-            # Hostname lookup removed as per user request
-            return "N/A"
-        except socket.gaierror:
+            return socket.gethostbyaddr(ip_address)[0]
+        except socket.herror:
             return "N/A"
 
     def get_mac_vendor(self, mac_address):
-        """Looks up the vendor for a given MAC address."""
-        # Vendor lookup removed as per user request
         return "N/A"
 
     def add_device_to_tree(self, device_data):
         """
         Adds a device to the treeview.
-        This method will no longer group by vendor.
         """
         self.found_count += 1
         ip = device_data["IP"]
         mac = device_data["MAC"]
-        # hostname = device_data["Hostname"] # Removed
-        # vendor = device_data["Vendor"] # Removed
         cred_set = device_data["Credential Set"]
         open_ports = device_data["Open Ports"]
         rtsp_url = device_data["RTSP URL"]
         camera_status = device_data["Camera Status"]
         snapshot = device_data["Snapshot"]
 
-        # No grouping, add directly as a top-level item
         item_id = self.tree.insert(
             '', tk.END, 
-            values=(ip, mac, cred_set, open_ports, rtsp_url, camera_status, snapshot), # Updated values
+            values=(ip, mac, cred_set, open_ports, rtsp_url, camera_status, snapshot),
             tags=('ip_dup',) if self.is_ip_duplicate(ip) else ()
         )
 
@@ -1216,40 +1429,51 @@ class RealTimeNetworkScanner:
 
         current_values = list(self.tree.item(item_id, 'values'))
         
-        # Update values based on new column order (IP, MAC, Credential Set, Open Ports, RTSP URL, Camera Status, Snapshot)
-        # Assuming rtsp_url is at index 4, camera_status at 5, snapshot_uri at 6
-        # And Credential Set is at index 2
-        
-        if len(current_values) >= 7: # Ensure enough columns
-            current_values[2] = cred_set_name # Credential Set
-            current_values[4] = rtsp_url # RTSP URL
-            current_values[5] = camera_status # Camera Status
-            current_values[6] = snapshot_uri # Snapshot URI
-        
-        self.tree.item(item_id, values=current_values)
-
-        current_tags = list(self.tree.item(item_id, 'tags'))
-        if camera_status == "ONVIF Found" and 'camera_found' not in current_tags:
-            self.tree.item(item_id, tags=current_tags + ('camera_found',))
-        elif camera_status != "ONVIF Found" and 'camera_found' in current_tags:
-            self.tree.item(item_id, tags=[t for t in current_tags if t != 'camera_found'])
-
-        if camera_status in ["Auth Failed", "Timeout", "Error"] and 'camera_error' not in current_tags:
-            self.tree.item(item_id, tags=current_tags + ('camera_error',))
-        elif camera_status not in ["Auth Failed", "Timeout", "Error"] and 'camera_error' in current_tags:
-            self.tree.item(item_id, tags=[t for t in current_tags if t != 'camera_error'])
+        if len(current_values) >= 7:
+            current_values[2] = cred_set_name
+            current_values[4] = rtsp_url
+            current_values[5] = camera_status
             
+            # Store snapshot_uri in tags and set appropriate text
+            current_tags = list(self.tree.item(item_id, 'tags'))
+            # Remove any existing snapshot_uri tag
+            current_tags = [tag for tag in current_tags if not tag.startswith('snapshot_uri:')]
+            if snapshot_uri:
+                current_tags.append(f'snapshot_uri:{snapshot_uri}')
+            
+            # Set snapshot column text based on availability
+            snapshot_status_text = "View Image" if snapshot_uri or rtsp_url else "Unavailable"
+            current_values[6] = snapshot_status_text
+            
+            # Update camera status tags
+            if camera_status == "ONVIF Found" and 'camera_found' not in current_tags:
+                current_tags.append('camera_found')
+            elif camera_status != "ONVIF Found" and 'camera_found' in current_tags:
+                if 'camera_found' in current_tags:
+                    current_tags.remove('camera_found')
+            
+            if camera_status in ["Auth Failed", "Timeout", "Error"] and 'camera_error' not in current_tags:
+                current_tags.append('camera_error')
+            elif camera_status not in ["Auth Failed", "Timeout", "Error"] and 'camera_error' in current_tags:
+                if 'camera_error' in current_tags:
+                    current_tags.remove('camera_error')
+            
+            # Update the tree item
+            self.tree.item(item_id, values=current_values, tags=current_tags)
+        else:
+            print("Invalid values length in update_camera_info")
+
     def update_open_ports(self, item_id, open_ports):
         """Updates the Open Ports column in the treeview."""
         if not self.tree.exists(item_id): return
         current_values = list(self.tree.item(item_id, 'values'))
-        if len(current_values) >= 4: # Assuming open ports is at index 3
+        if len(current_values) >= 4:
             current_values[3] = ", ".join(map(str, open_ports)) if open_ports else "N/A"
         self.tree.item(item_id, values=current_values)
 
     def is_ip_duplicate(self, ip):
         """Checks if an IP already exists in the treeview."""
-        for item_id in self.tree.get_children(): # Iterate directly over children
+        for item_id in self.tree.get_children():
             if self.tree.item(item_id, 'values')[0] == ip:
                 return True
         return False
@@ -1263,9 +1487,11 @@ class RealTimeNetworkScanner:
         return all_children
 
     def sort_treeview_column(self, col, reverse):
-        # Sorts only top-level items as grouping is removed
         data = [(self.tree.set(child, col), child) for child in self.tree.get_children('')]
+        
+        # Basic sorting for now, can be improved for numeric/IP sorting
         data.sort(reverse=reverse)
+        
         for index, (val, item) in enumerate(data):
             self.tree.move(item, '', index)
         self.tree.heading(col, command=lambda: self.sort_treeview_column(col, not reverse))
@@ -1285,34 +1511,192 @@ class RealTimeNetworkScanner:
 
     def filter_results(self, event=None):
         query = self.search_var.get().lower()
-        for item_id in self.tree.get_children(): # Iterate directly over children
-            values = [str(v).lower() for v in self.tree.item(item_id, 'values')]
-            
-            # Check if query matches any of the remaining columns
-            if any(query in v for v in values):
-                self.tree.item(item_id, open=True, tags=('match',))
-                self.tree.reattach(item_id, '', tk.END) # Bring matching items to bottom (or top if needed)
-            else:
-                self.tree.detach(item_id)
         
-        # Bring non-matching items back if search query is empty
-        if not query:
-            all_items = self.tree.get_children('')
-            for item_id in all_items:
-                self.tree.reattach(item_id, '', tk.END)
+        # First, re-attach all items to make sure we search everything
+        all_items = self.tree.get_children('')
+        for item_id in all_items:
+             self.tree.reattach(item_id, '', tk.END)
 
-    def _on_tree_motion(self, event):
-        item_id = self.tree.identify_row(event.y)
-        if not item_id:
-            self._on_tree_leave(event)
+        if not query:
             return
 
-        # No snapshot display, so hover logic is removed
-        pass
+        # Now, detach items that do not match
+        for item_id in self.tree.get_children(''):
+            values = [str(v).lower() for v in self.tree.item(item_id, 'values')]
+            
+            if not any(query in v for v in values):
+                self.tree.detach(item_id)
+
+    def _on_tree_motion(self, event):
+        """Handles mouse motion over the Treeview for hover functionality."""
+        item_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+
+        # Check if we are over the Snapshot column (column #7)
+        if item_id and column_id == '#7':
+            item_values = self.tree.item(item_id, 'values')
+            snapshot_status_text = item_values[6]  # 6th index in the values tuple
+
+            if snapshot_status_text == "View Image":
+                if item_id != self.current_hover_item:
+                    self._hide_hover_image()
+                    self.current_hover_item = item_id
+
+                    # Extract the snapshot_uri from the tags
+                    snapshot_uri = ""
+                    item_tags = self.tree.item(item_id, 'tags')
+                    for tag in item_tags:
+                        if tag.startswith('snapshot_uri:'):
+                            snapshot_uri = tag.split(':', 1)[1]
+                            break
+
+                    # Get the RTSP URL and credentials
+                    ip = item_values[0]
+                    cred_set_name = self.camera_ip_to_cred_set.get(ip, "Default Admin")
+                    cred_info = self.credential_sets.get(cred_set_name)
+                    username = cred_info['username'] if cred_info else "admin"
+                    password = self.decrypt_password(cred_info['password']) if cred_info else "admin"
+                    rtsp_url = item_values[4]  # RTSP URL is at index 4
+
+                    # Create hover window
+                    self.hover_window = tk.Toplevel(self.root)
+                    self.hover_window.wm_overrideredirect(True)
+                    self.hover_window.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+                    self.hover_window.attributes("-topmost", True)
+
+                    self.hover_image_label = ttk.Label(self.hover_window, text="Loading...")
+                    self.hover_image_label.pack(padx=5, pady=5)
+
+                    self.last_hover_thread_id += 1
+                    thread_id = self.last_hover_thread_id
+                    self.hover_image_thread = threading.Thread(
+                        target=self._fetch_thumbnail_for_hover,
+                        args=(thread_id, ip, username, password, rtsp_url, snapshot_uri)
+                    )
+                    self.hover_image_thread.daemon = True
+                    self.hover_image_thread.start()
+            else:
+                self._hide_hover_image()
+        else:
+            self._hide_hover_image()
 
     def _on_tree_leave(self, event):
-        # No snapshot display, so hover logic is removed
-        pass
+        """Handles mouse leaving the Treeview, hides hover image."""
+        self._hide_hover_image()
+
+    def _hide_hover_image(self):
+        """Hides and destroys the hover image window."""
+        if self.hover_window:
+            self.hover_window.destroy()
+            self.hover_window = None
+            self.hover_image_label = None
+            self.current_hover_item = None
+            self.current_hover_image_tk = None
+
+    def _fetch_thumbnail_for_hover(self, thread_id, ip, username, password, rtsp_url, snapshot_uri):
+        """Fetches and processes a thumbnail for hover display."""
+        if thread_id != self.last_hover_thread_id:
+            return
+
+        thumbnail_size = (160, 120)
+        image_key = f"hover_thumbnail_{ip}"
+
+        # Check cache first
+        if image_key in self.hover_image_cache:
+            self.root.after(0, lambda: self._update_hover_window(thread_id, self.hover_image_cache[image_key]))
+            return
+
+        image_data = None
+        
+        # First try snapshot URI if available
+        if snapshot_uri:
+            try:
+                auth = (username, password) if username and password else None
+                response = requests.get(snapshot_uri, auth=auth, timeout=3)
+                response.raise_for_status()
+                image_data = response.content
+            except Exception as e:
+                print(f"Error fetching thumbnail from Snapshot URI ({snapshot_uri}): {e}")
+                image_data = None
+        
+        # If snapshot URI fails, try RTSP stream
+        if not image_data and rtsp_url:
+            try:
+                # Add credentials to RTSP URL if needed
+                if username and password:
+                    parsed_url = urlparse(rtsp_url)
+                    netloc_with_auth = f"{username}:{password}@{parsed_url.hostname}"
+                    if parsed_url.port:
+                        netloc_with_auth += f":{parsed_url.port}"
+                    rtsp_url_with_auth = parsed_url._replace(netloc=netloc_with_auth).geturl()
+                else:
+                    rtsp_url_with_auth = rtsp_url
+                
+                # Capture frame from RTSP stream
+                cap = cv2.VideoCapture(rtsp_url_with_auth)
+                if not cap.isOpened():
+                    raise ConnectionError("Cannot open RTSP stream")
+                
+                # Try to get a frame
+                ret, frame = False, None
+                for _ in range(5):  # Try multiple times
+                    ret, frame = cap.read()
+                    if ret:
+                        break
+                
+                cap.release()
+                
+                if ret and frame is not None:
+                    # Convert to PIL Image
+                    image_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    image_pil.thumbnail(thumbnail_size, Image.LANCZOS)
+                    img_byte_arr = io.BytesIO()
+                    image_pil.save(img_byte_arr, format='PNG')
+                    image_data = img_byte_arr.getvalue()
+                else:
+                    raise ValueError("Failed to capture frame from RTSP")
+                    
+            except Exception as e:
+                print(f"Error fetching thumbnail from RTSP ({rtsp_url}): {e}")
+                image_data = None
+
+        if image_data:
+            try:
+                img = Image.open(io.BytesIO(image_data))
+                img.thumbnail(thumbnail_size, Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self.hover_image_cache[image_key] = photo
+                self.root.after(0, lambda: self._update_hover_window(thread_id, photo))
+            except Exception as e:
+                print(f"Error processing image: {e}")
+                self.root.after(0, lambda: self._update_hover_window_error(thread_id, "Error loading image"))
+        else:
+            self.root.after(0, lambda: self._update_hover_window_error(thread_id, "No image available"))
+
+    def _update_hover_window(self, thread_id, photo):
+        """Updates the hover window with the thumbnail."""
+        if thread_id != self.last_hover_thread_id or not self.hover_window:
+            return
+
+        if self.hover_image_label:
+            self.hover_image_label.destroy()
+        
+        self.current_hover_image_tk = photo
+        image_label = ttk.Label(self.hover_window, image=photo)
+        image_label.pack()
+        self.hover_window.update_idletasks()
+
+    def _update_hover_window_error(self, thread_id, message):
+        """Updates the hover window with an error message."""
+        if thread_id != self.last_hover_thread_id or not self.hover_window:
+            return
+
+        if self.hover_image_label:
+            self.hover_image_label.config(text=message)
+        else:
+            error_label = ttk.Label(self.hover_window, text=message)
+            error_label.pack(padx=5, pady=5)
+        self.hover_window.update_idletasks()
 
     def save_project(self):
         """Saves current device data to a JSON file."""
@@ -1325,19 +1709,16 @@ class RealTimeNetworkScanner:
             return
 
         results_to_save = []
-        for item_id in self.tree.get_children(): # Iterate directly over children
+        for item_id in self.tree.get_children():
             values = self.tree.item(item_id, 'values')
-            # Adjust mapping based on new column structure
             device_data = {
                 "IP": values[0],
                 "MAC": values[1],
-                # "Hostname": values[2], # Removed
-                # "Vendor": values[3], # Removed
-                "Credential Set": values[2], # New index
-                "Open Ports": values[3], # New index
-                "RTSP URL": values[4], # New index
-                "Camera Status": values[5], # New index
-                "Snapshot": values[6] # New index
+                "Credential Set": values[2],
+                "Open Ports": values[3],
+                "RTSP URL": values[4],
+                "Camera Status": values[5],
+                "Snapshot": values[6]
             }
             results_to_save.append(device_data)
 
@@ -1361,22 +1742,17 @@ class RealTimeNetworkScanner:
             with open(file_path, 'r') as f:
                 loaded_data = json.load(f)
 
-            # Clear current view before loading
             self.tree.delete(*self.tree.get_children())
-            # self.vendor_nodes.clear() # Removed
             self.found_count = 0
 
-            # Repopulate the tree with loaded data
             for device_data in loaded_data:
-                self.found_count += 1
-                self.add_device_to_tree(device_data) # This method needs to handle the new structure
+                self.add_device_to_tree(device_data) 
             
             self.update_status(f"Project loaded. {self.found_count} devices.")
         except Exception as e:
             self.show_floating_message(f"Error loading project: {e}")
 
 if __name__ == "__main__":
-    # Use ThemedTk to get access to modern themes
     root = ThemedTk(theme="arc")
     app = RealTimeNetworkScanner(root)
     root.mainloop()
