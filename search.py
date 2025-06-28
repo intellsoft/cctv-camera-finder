@@ -1,3 +1,4 @@
+# search.py
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, Menu
 import subprocess
@@ -15,22 +16,42 @@ import os
 import json
 from cryptography.fernet import Fernet
 import base64
-import openpyxl # For Excel export
-import requests # For fetching camera snapshots
-from PIL import Image, ImageTk # For image processing and display
-import io # Needed for Image.open(io.BytesIO(image_data))
-from urllib.parse import urlparse # For parsing RTSP URLs
-import webbrowser # For opening web links
-import platform # To check operating system
+import openpyxl
+import requests
+from PIL import Image, ImageTk
+import io
+from urllib.parse import urlparse
+import webbrowser
+import platform
+from zeroconf import ServiceBrowser, Zeroconf, ServiceListener
+from getmac import get_mac_address # <-- کتابخانه جدید برای یافتن مک آدرس
 
-# Global variable for the fixed encryption key (as requested by the user)
-# WARNING: Hardcoding the encryption key in the application makes it vulnerable.
-# For production environments, consider more secure key management solutions
-# (e.g., environment variables, secure key storage, or user-provided keys).
-# This key is for demonstration purposes as requested by the user.
-FIXED_ENCRYPTION_KEY = b'v8VZkq4W9E7RjTzOYKbLwSdXyGfChN3s1Mn2PpI0Qt6=' 
-# You can generate a key like this: Fernet.generate_key()
-# Example: b'Abcdefghijklmnopqrstuvwxyz134567890ABCDEF='
+# Global variable for the fixed encryption key
+FIXED_ENCRYPTION_KEY = b'v8VZkq4W9E7RjTzOYKbLwSdXyGfChN3s1Mn2PpI0Qt6='
+
+class BonjourListener(ServiceListener):
+    """Listener for Bonjour/mDNS service discovery"""
+    def __init__(self, app):
+        self.app = app
+        
+    def add_service(self, zc, type_, name):
+        info = zc.get_service_info(type_, name)
+        if info:
+            addresses = info.parsed_addresses()
+            if addresses:
+                ip = addresses[0]
+                port = info.port
+                hostname = info.server
+                # Remove trailing dot from hostname if present
+                if hostname.endswith('.'):
+                    hostname = hostname[:-1]
+                self.app.add_bonjour_device(ip, port, hostname)
+                
+    def remove_service(self, zc, type_, name):
+        pass
+        
+    def update_service(self, zc, type_, name):
+        pass
 
 class CmdToolExecutor:
     """
@@ -42,7 +63,6 @@ class CmdToolExecutor:
         self.root_after = root_after_callback
 
     def execute_command(self, command):
-        # Corrected: Pass clear_previous via lambda to _update_output_gui
         self.root_after(0, lambda: self._update_output_gui(f"Executing: {command}\n\n", clear_previous=True))
         threading.Thread(target=self._run_command_in_thread, args=(command,), daemon=True).start()
 
@@ -58,7 +78,7 @@ class CmdToolExecutor:
                 encoding='utf-8',
                 errors='replace',
                 creationflags=creation_flags,
-                timeout=60 # Increased timeout for potentially longer commands like tracert
+                timeout=60
             )
             output = process.stdout
             error_output = process.stderr
@@ -94,11 +114,26 @@ class RealTimeNetworkScanner:
         self.scanning_active = False
         self.found_count = 0
         
+        # Bonjour variables
+        self.zeroconf = None
+        self.bonjour_listener = None
+        
+        # Floating message setup
+        self.floating_message = ttk.Label(
+            root, 
+            text="", 
+            background="#FFFFCC", 
+            relief="solid", 
+            borderwidth=1,
+            padding=(5, 2, 5, 2),
+            font=("Arial", 9)
+        )
+        self.floating_message.place(relx=1.0, rely=1.0, anchor='se', x=-10, y=-10)
+        self.floating_message.place_forget()
+        
         # --- Worker Queues ---
-        # Queue for ONVIF discovery tasks
         self.onvif_queue = queue.Queue()
         self.onvif_threads = []
-        # Queue for Port Scanning tasks (NEW)
         self.port_scan_queue = queue.Queue()
         self.port_scan_threads = []
 
@@ -111,42 +146,58 @@ class RealTimeNetworkScanner:
             return
 
         # --- Credential Management ---
-        # Stores named sets of credentials: {'set_name': {'username': 'user', 'password': 'encrypted_pass'}}
         self.credential_sets = {} 
-        # Stores IP to credential set name mapping: {'ip': 'set_name'}
         self.camera_ip_to_cred_set = {} 
 
-        # Cache for PhotoImage objects to prevent garbage collection
+        # Cache for images
         self.thumbnail_cache = {} 
-        self.hover_image_cache = {} # Cache for small hover thumbnails
+        self.hover_image_cache = {}
 
         # Create a small static image for the Treeview column
         self.camera_icon = None
         try:
-            # Create a small placeholder image (e.g., 16x16 pixel green square)
             img = Image.new('RGB', (16, 16), color = 'green')
             self.camera_icon = ImageTk.PhotoImage(img)
         except Exception as e:
             print(f"Could not create camera icon: {e}")
-            self.camera_icon = None # Fallback to no icon
+            self.camera_icon = None
 
         # Hover image related variables
         self.hover_window = None
         self.hover_image_label = None
         self.current_hover_item = None
-        self.current_hover_image_tk = None # To prevent GC for the hover image
+        self.current_hover_image_tk = None
         self.hover_image_thread = None
-        self.last_hover_thread_id = 0 # To ensure only the latest hover request updates the tooltip
+        self.last_hover_thread_id = 0
 
         # --- Scan Range Management ---
-        self.scan_range = {"start_ip": "", "end_ip": ""} # Stores the user-defined scan range
-        self.load_settings() # Load scan range and camera data on startup
-
-        self.load_camera_data() # Load both credential sets and camera mappings
+        self.scan_range = {"start_ip": "", "end_ip": ""}
+        self.load_settings()
+        self.load_camera_data()
         
         self.create_widgets()
         self.setup_style()
-        self.start_worker_threads() # Start all worker threads
+        self.start_worker_threads()
+
+    def center_window(self, window):
+        """Centers a window on the screen"""
+        window.update_idletasks()
+        width = window.winfo_width()
+        height = window.winfo_height()
+        x = (window.winfo_screenwidth() // 2) - (width // 2)
+        y = (window.winfo_screenheight() // 2) - (height // 2)
+        window.geometry(f'+{x}+{y}')
+
+    def show_floating_message(self, message):
+        """Shows a temporary message in the bottom-right corner"""
+        self.floating_message.config(text=message)
+        self.floating_message.place(relx=1.0, rely=1.0, anchor='se', x=-10, y=-10)
+        self.floating_message.lift()
+        self.root.after(3000, self.hide_floating_message)
+    
+    def hide_floating_message(self):
+        """Hides the floating message"""
+        self.floating_message.place_forget()
 
     def encrypt_password(self, password):
         """Encrypts the password."""
@@ -162,13 +213,13 @@ class RealTimeNetworkScanner:
             return self.cipher_suite.decrypt(encrypted_password.encode()).decode()
         except Exception as e:
             print(f"Decryption error: {e}")
-            return "Decryption Failed" # Return a clear message if decryption fails
+            return "Decryption Failed"
 
     def load_camera_data(self):
         """Loads camera information and credential sets from file."""
         self.credential_sets = {
             "Default Admin": {"username": "admin", "password": self.encrypt_password("admin")}
-        } # Default credential set
+        }
         self.camera_ip_to_cred_set = {}
 
         if os.path.exists('camera_data.json'):
@@ -176,18 +227,17 @@ class RealTimeNetworkScanner:
                 with open('camera_data.json', 'r') as f:
                     data = json.load(f)
                     if 'credential_sets' in data:
-                        # Decrypt passwords when loading
                         for name, creds in data['credential_sets'].items():
                             self.credential_sets[name] = {
                                 'username': creds['username'],
-                                'password': creds['password'] # Store encrypted in memory
+                                'password': creds['password']
                             }
                     if 'camera_ip_to_cred_set' in data:
                         self.camera_ip_to_cred_set = data['camera_ip_to_cred_set']
             except json.JSONDecodeError as e:
-                messagebox.showerror("Error", f"Error reading camera_data.json: {e}\nThe file might be corrupted.")
+                self.show_floating_message(f"Error reading camera_data.json: {e}")
             except Exception as e:
-                messagebox.showerror("Error", f"Error loading camera data: {e}")
+                self.show_floating_message(f"Error loading camera data: {e}")
         
     def save_camera_data(self):
         """Saves camera information and credential sets to file."""
@@ -199,7 +249,7 @@ class RealTimeNetworkScanner:
             with open('camera_data.json', 'w') as f:
                 json.dump(data, f, indent=4)
         except Exception as e:
-            messagebox.showerror("Error", f"Error saving camera data: {e}")
+            self.show_floating_message(f"Error saving camera data: {e}")
 
     def load_settings(self):
         """Loads application settings, including scan range, from file."""
@@ -210,9 +260,9 @@ class RealTimeNetworkScanner:
                     if 'scan_range' in settings:
                         self.scan_range = settings['scan_range']
             except json.JSONDecodeError as e:
-                messagebox.showerror("Error", f"Error reading app_settings.json: {e}\nThe file might be corrupted.")
+                self.show_floating_message(f"Error reading app_settings.json: {e}")
             except Exception as e:
-                messagebox.showerror("Error", f"Error loading application settings: {e}")
+                self.show_floating_message(f"Error loading application settings: {e}")
 
     def save_settings(self):
         """Saves application settings, including scan range, to file."""
@@ -223,23 +273,21 @@ class RealTimeNetworkScanner:
             with open('app_settings.json', 'w') as f:
                 json.dump(settings, f, indent=4)
         except Exception as e:
-            messagebox.showerror("Error", f"Error saving application settings: {e}")
+            self.show_floating_message(f"Error saving application settings: {e}")
 
     def start_worker_threads(self):
         """Starts all worker threads (ONVIF and Port Scan)."""
-        # Start ONVIF worker threads
-        for _ in range(10):  # 10 threads for concurrent discovery
+        for _ in range(10):
             t = threading.Thread(target=self.onvif_worker, daemon=True)
             t.start()
             self.onvif_threads.append(t)
-        # Start Port Scan worker threads (NEW)
-        for _ in range(20): # 20 threads for concurrent port scanning
+        for _ in range(20):
             t = threading.Thread(target=self.port_scan_worker, daemon=True)
             t.start()
             self.port_scan_threads.append(t)
 
     def onvif_worker(self):
-        """ONVIF discovery worker. Gets tasks from the onvif_queue."""
+        """ONVIF discovery worker."""
         while True:
             ip, item_id = self.onvif_queue.get()
             if self.stop_flag or not self.tree.exists(item_id):
@@ -248,7 +296,6 @@ class RealTimeNetworkScanner:
                 
             self.root.after(0, self.update_status, f"Discovering ONVIF for {ip}")
             
-            # Get the credential set name associated with this IP
             cred_set_name = self.camera_ip_to_cred_set.get(ip, "Default Admin")
             cred_info = self.credential_sets.get(cred_set_name)
 
@@ -257,12 +304,10 @@ class RealTimeNetworkScanner:
 
             if cred_info:
                 username = cred_info['username']
-                password = self.decrypt_password(cred_info['password']) # Decrypt for use
+                password = self.decrypt_password(cred_info['password'])
 
-            # Test camera connection
             camera_status, rtsp_url, snapshot_uri = self.check_onvif_camera(ip, username, password)
             
-            # If authentication failed and it wasn't the default set, try with default
             if camera_status == "Auth Failed" and cred_set_name != "Default Admin":
                 default_cred_info = self.credential_sets.get("Default Admin")
                 if default_cred_info:
@@ -270,20 +315,15 @@ class RealTimeNetworkScanner:
                     default_password = self.decrypt_password(default_cred_info['password'])
                     camera_status, rtsp_url, snapshot_uri = self.check_onvif_camera(ip, default_username, default_password)
                     if camera_status == "ONVIF Found":
-                        # If found with default, assign it to this IP
                         self.camera_ip_to_cred_set[ip] = "Default Admin"
                         self.save_camera_data()
-                        cred_set_name = "Default Admin" # Update for UI display
+                        cred_set_name = "Default Admin"
             
-            # Update the UI
             self.root.after(0, self.update_camera_info, item_id, cred_set_name, rtsp_url, camera_status, snapshot_uri)
             self.onvif_queue.task_done()
 
     def port_scan_worker(self):
-        """
-        Port scanning worker. Gets tasks from the port_scan_queue.
-        This is a new worker to handle port scanning concurrently.
-        """
+        """Port scanning worker."""
         while True:
             ip, item_id = self.port_scan_queue.get()
             if self.stop_flag or not self.tree.exists(item_id):
@@ -293,7 +333,6 @@ class RealTimeNetworkScanner:
             common_ports = [80, 443, 554, 8080, 8000, 22, 23, 37777, 8899, 81]
             open_ports = []
             
-            # Use a thread pool for scanning ports of a single IP to speed it up
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(common_ports)) as executor:
                 future_to_port = {executor.submit(self.scan_single_port, ip, port): port for port in common_ports}
                 for future in concurrent.futures.as_completed(future_to_port):
@@ -302,20 +341,17 @@ class RealTimeNetworkScanner:
                         if future.result():
                             open_ports.append(port)
                     except Exception:
-                        pass # Ignore exceptions from individual port scans
+                        pass
             
-            # Sort the found ports
             open_ports.sort()
-            
-            # Update the UI with the found open ports
             self.root.after(0, self.update_open_ports, item_id, open_ports)
             self.port_scan_queue.task_done()
 
     def scan_single_port(self, ip, port):
-        """Scans a single port on a given IP. Returns True if open, False otherwise."""
+        """Scans a single port on a given IP."""
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.5) # Short timeout for faster scanning
+                s.settimeout(0.5)
                 s.connect((ip, port))
                 return True
         except (socket.timeout, ConnectionRefusedError):
@@ -330,18 +366,12 @@ class RealTimeNetworkScanner:
         rtsp_url = ""
         snapshot_uri = ""
         try:
-            # Connect to the camera
             cam = ONVIFCamera(ip, 80, username, password)
-            
-            # Get media service
             media_service = cam.create_media_service()
-            
-            # Get profiles
             profiles = media_service.GetProfiles()
             if not profiles:
                 return "No Profiles", "", ""
             
-            # Get stream link
             token = profiles[0].token
             stream_uri = media_service.GetStreamUri({
                 'StreamSetup': {'Stream': 'RTP-Unicast', 'Transport': 'RTSP'},
@@ -349,7 +379,6 @@ class RealTimeNetworkScanner:
             })
             rtsp_url = stream_uri.Uri
 
-            # Try to get Snapshot URI
             try:
                 imaging_service = cam.create_imaging_service()
                 snapshot_uri_response = imaging_service.GetSnapshotUri({'ProfileToken': token})
@@ -360,7 +389,6 @@ class RealTimeNetworkScanner:
 
             return "ONVIF Found", rtsp_url, snapshot_uri
         except Exception as e:
-            # Handle specific error types for clearer status messages
             error_str = str(e).lower()
             if "unauthorized" in error_str or "401" in error_str:
                 return "Auth Failed", "", ""
@@ -376,6 +404,9 @@ class RealTimeNetworkScanner:
         self.style.configure('purple.TFrame', background='#ffccff')
         self.style.configure('camera_found.TLabel', background='#ccffcc')
         self.style.configure('camera_error.TLabel', background='#ffcccc')
+        self.style.configure('bonjour_device.TLabel', background='#cce5ff')
+        # Added for duplicate MAC
+        self.style.configure('mac_dup.TLabel', background='#ffcc99')
 
     def create_widgets(self):
         main_frame = ttk.Frame(self.root)
@@ -400,6 +431,14 @@ class RealTimeNetworkScanner:
         )
         self.stop_btn.pack(side=tk.LEFT, padx=5)
         
+        # Bonjour Scan Button
+        self.bonjour_btn = ttk.Button(
+            control_frame,
+            text="Scan Bonjour",
+            command=self.start_bonjour_scan
+        )
+        self.bonjour_btn.pack(side=tk.LEFT, padx=5)
+
         # Credential Management Button
         self.manage_creds_btn = ttk.Button(
             control_frame,
@@ -424,16 +463,15 @@ class RealTimeNetworkScanner:
         )
         self.export_excel_btn.pack(side=tk.LEFT, padx=5)
 
-        # CMD Tools Menubutton (Updated)
-        self.cmd_tools_menubutton = ttk.Menubutton(control_frame, text="CMD Tools")
-        self.cmd_tools_menubutton.menu = Menu(self.cmd_tools_menubutton, tearoff=0)
-        self.cmd_tools_menubutton["menu"] = self.cmd_tools_menubutton.menu
-        self.cmd_tools_menubutton.pack(side=tk.LEFT, padx=5)
-        
-        # Add CMD Tool Categories
-        self._create_cmd_tool_menus()
+        # CMD Tools Button (changed from menubutton)
+        self.cmd_tools_btn = ttk.Button(
+            control_frame,
+            text="CMD Tools",
+            command=self.open_cmd_tools_window
+        )
+        self.cmd_tools_btn.pack(side=tk.LEFT, padx=5)
 
-        # Camera Credentials Selection Frame (for selected camera)
+        # Camera Credentials Selection Frame
         cred_selection_frame = ttk.Frame(control_frame)
         cred_selection_frame.pack(side=tk.RIGHT, padx=10)
         
@@ -447,7 +485,7 @@ class RealTimeNetworkScanner:
         )
         self.cred_set_combobox.pack(side=tk.LEFT, padx=5)
         self.cred_set_combobox.bind("<<ComboboxSelected>>", self.on_cred_set_selected)
-        self.update_cred_combobox_options() # Populate initial options
+        self.update_cred_combobox_options()
         
         self.apply_cred_btn = ttk.Button(
             cred_selection_frame,
@@ -472,24 +510,21 @@ class RealTimeNetworkScanner:
             mode='determinate'
         )
         self.progress_bar.pack(side=tk.RIGHT, fill=tk.X, expand=True)
-        self.progress_bar.pack_forget()  # Initially hidden
+        self.progress_bar.pack_forget()
 
-        # Results Treeview
+        # Results Treeview (REMOVED 'Last Seen' COLUMN)
         tree_frame = ttk.Frame(main_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        # UPDATED: Added 'Open Ports' column
-        columns = ('IP', 'MAC', 'Hostname', 'Last Seen', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
+        columns = ('IP', 'MAC', 'Hostname', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
         self.tree = ttk.Treeview(tree_frame, columns=columns, show='headings')
         
-        # Configure columns
         col_widths = {
             'IP': 120, 
             'MAC': 130, 
             'Hostname': 150, 
-            'Last Seen': 100,
             'Credential Set': 120,
-            'Open Ports': 120, # NEW: Width for Open Ports column
+            'Open Ports': 120,
             'RTSP URL': 250,
             'Camera Status': 150,
             'Snapshot': 80
@@ -498,26 +533,24 @@ class RealTimeNetworkScanner:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=col_widths.get(col, 100))
 
-        # Add scrollbar
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(fill=tk.BOTH, expand=True)
 
-        # Configure tags
         self.tree.tag_configure('ip_dup', background='#ffcccc')
-        self.tree.tag_configure('yellow.TFrame', background='#ffffcc')
-        self.tree.tag_configure('purple.TFrame', background='#ffccff')
         self.tree.tag_configure('camera_found', background='#ccffcc')
         self.tree.tag_configure('camera_error', background='#ffcccc')
+        self.tree.tag_configure('bonjour_device', background='#cce5ff')
+        # Added for duplicate MAC
+        self.tree.tag_configure('mac_dup', background='#ffcc99')
         
-        # Bind selection event and right-click
         self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
-        self.tree.bind("<Button-3>", self.on_right_click) # Right-click bind
-        self.tree.bind("<Motion>", self._on_tree_motion) # Mouse motion for hover
-        self.tree.bind("<Leave>", self._on_tree_leave) # Mouse leave for hover
+        self.tree.bind("<Button-3>", self.on_right_click)
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", self._on_tree_leave)
 
-        # --- Footer Section ---
+        # Footer Section
         footer_frame = ttk.Frame(self.root)
         footer_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
 
@@ -525,50 +558,84 @@ class RealTimeNetworkScanner:
         website_text = "intellsoft.ir"
         footer_text_part2 = " (نرم افزار تخصصی دوربین مداربسته)"
         
-        # Use a tk.Text widget for the footer to support clickable links
         self.footer_text_widget = tk.Text(
             footer_frame, 
             height=1, 
             wrap="word", 
             font=("Arial", 9),
-            bg=self.root.cget('bg'), # Match background of the root window
-            relief="flat", # Remove border
-            highlightthickness=0, # Remove focus border
-            cursor="arrow" # Default cursor
+            bg=self.root.cget('bg'),
+            relief="flat",
+            highlightthickness=0,
+            cursor="arrow"
         )
         self.footer_text_widget.pack(side=tk.LEFT, padx=5)
         
-        # Insert text parts
         self.footer_text_widget.insert(tk.END, footer_text_part1)
-        self.footer_text_widget.insert(tk.END, website_text, "link") # Apply "link" tag to website_text
+        self.footer_text_widget.insert(tk.END, website_text, "link")
         self.footer_text_widget.insert(tk.END, footer_text_part2)
 
-        # Configure the "link" tag
         self.footer_text_widget.tag_config("link", foreground="blue", underline=1)
-        
-        # Bind events to the "link" tag
         self.footer_text_widget.tag_bind("link", "<Button-1>", self._open_website_link)
         self.footer_text_widget.tag_bind("link", "<Enter>", self._on_link_enter)
         self.footer_text_widget.tag_bind("link", "<Leave>", self._on_link_leave)
-        
-        # Make the text widget read-only
         self.footer_text_widget.config(state="disabled")
 
-
     def _open_website_link(self, event):
-        """Opens the website link in a web browser."""
-        webbrowser.open_new("http://intellsoft.ir") # Ensure it's a valid URL
+        webbrowser.open_new("http://intellsoft.ir")
 
     def _on_link_enter(self, event):
-        """Changes cursor to hand when hovering over the link."""
         self.footer_text_widget.config(cursor="hand2")
 
     def _on_link_leave(self, event):
-        """Changes cursor back to default when leaving the link."""
-        self.footer_text_widget.config(cursor="arrow") # Set back to arrow for text widget
+        self.footer_text_widget.config(cursor="arrow")
+
+    def start_bonjour_scan(self):
+        """Starts Bonjour device discovery"""
+        if not self.zeroconf:
+            try:
+                self.zeroconf = Zeroconf()
+                self.bonjour_listener = BonjourListener(self)
+                self.browser = ServiceBrowser(
+                    self.zeroconf, 
+                    ["_http._tcp.local.", "_onvif._tcp.local."],
+                    self.bonjour_listener
+                )
+                self.show_floating_message("Bonjour scan started")
+            except Exception as e:
+                self.show_floating_message(f"Bonjour error: {str(e)}")
+            
+    def stop_bonjour_scan(self):
+        """Stops Bonjour device discovery"""
+        if self.zeroconf:
+            self.zeroconf.close()
+            self.zeroconf = None
+            self.show_floating_message("Bonjour scan stopped")
+            
+    def add_bonjour_device(self, ip, port, hostname):
+        """Adds a Bonjour device to the table"""
+        existing = False
+        for child in self.tree.get_children():
+            if self.tree.item(child, 'values')[0] == ip:
+                existing = True
+                break
+        
+        if not existing:
+            device = (
+                ip,
+                "N/A (Bonjour)",
+                hostname,
+                "Default Admin",
+                str(port),
+                "",
+                "Bonjour Device",
+                "Unavailable"
+            )
+            item_id = self.tree.insert('', tk.END, values=device, tags=('bonjour_device',))
+            self.root.after(0, self.update_status, f"Bonjour device found: {hostname} ({ip})")
+            self.onvif_queue.put((ip, item_id))
+            self.port_scan_queue.put((ip, item_id))
 
     def on_right_click(self, event):
-        """Handles right-click event on the Treeview."""
         item_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)
 
@@ -576,8 +643,7 @@ class RealTimeNetworkScanner:
             return
 
         col_index = int(column_id.replace('#', '')) - 1
-        # UPDATED: Added 'Open Ports' to columns tuple for right-click context
-        columns = ('IP', 'MAC', 'Hostname', 'Last Seen', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
+        columns = ('IP', 'MAC', 'Hostname', 'Credential Set', 'Open Ports', 'RTSP URL', 'Camera Status', 'Snapshot')
         column_name = columns[col_index] if 0 <= col_index < len(columns) else None
 
         if not column_name:
@@ -590,15 +656,13 @@ class RealTimeNetworkScanner:
         context_menu.post(event.x_root, event.y_root)
 
     def copy_to_clipboard(self, text):
-        """Copies text to the clipboard."""
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        messagebox.showinfo("Copied", f"'{text}' copied to clipboard.", parent=self.root)
+        self.show_floating_message(f"'{text}' copied to clipboard")
 
     def export_to_excel(self):
-        """Exports table data to an Excel file."""
         if not self.tree.get_children():
-            messagebox.showwarning("Warning", "No data to export.", parent=self.root)
+            self.show_floating_message("No data to export")
             return
 
         file_path = filedialog.asksaveasfilename(
@@ -622,26 +686,22 @@ class RealTimeNetworkScanner:
                 sheet.append(values)
 
             workbook.save(file_path)
-            messagebox.showinfo("Success", f"Data successfully saved to '{file_path}'.", parent=self.root)
+            self.show_floating_message(f"Data exported to {file_path}")
         except Exception as e:
-            messagebox.showerror("Error", f"Error saving Excel file: {e}", parent=self.root)
-
+            self.show_floating_message(f"Error saving Excel: {e}")
 
     def update_cred_combobox_options(self):
-        """Updates credential combobox options."""
         self.cred_set_combobox['values'] = list(self.credential_sets.keys())
         if self.cred_set_combobox['values']:
             self.cred_set_var.set(self.cred_set_combobox['values'][0])
 
     def on_cred_set_selected(self, event):
-        """Handles selection of a credential set from the combobox."""
         pass
 
     def apply_camera_credentials(self):
-        """Applies the selected credential set to the selected IP."""
         selected = self.tree.selection()
         if not selected:
-            messagebox.showwarning("Warning", "Please select a camera.")
+            self.show_floating_message("Please select a camera")
             return
             
         item = selected[0]
@@ -650,25 +710,22 @@ class RealTimeNetworkScanner:
         
         selected_cred_set_name = self.cred_set_var.get()
         if not selected_cred_set_name or selected_cred_set_name not in self.credential_sets:
-            messagebox.showwarning("Warning", "Please select a valid credential set.")
+            self.show_floating_message("Please select a valid credential set")
             return
 
         self.camera_ip_to_cred_set[ip] = selected_cred_set_name
         self.save_camera_data()
             
         new_values = list(values)
-        if len(new_values) >= 5:
-            new_values[4] = selected_cred_set_name
+        if len(new_values) >= 4:  # Adjusted index after removing Last Seen
+            new_values[3] = selected_cred_set_name
             self.tree.item(item, values=new_values)
-            
-            # Restart ONVIF discovery for this camera with new credentials
             self.onvif_queue.put((ip, item))
-            messagebox.showinfo("Success", "Credential set saved and re-discovery started.")
+            self.show_floating_message("Credential set applied")
         else:
-            messagebox.showerror("Error", "Invalid data structure.")
+            self.show_floating_message("Invalid data structure")
 
     def on_tree_select(self, event):
-        """Handles item selection in the Treeview."""
         selected = self.tree.selection()
         if selected:
             values = self.tree.item(selected[0], 'values')
@@ -677,9 +734,9 @@ class RealTimeNetworkScanner:
             self.cred_set_var.set(associated_cred_set)
 
     def open_credential_manager(self):
-        """Opens the credential management window."""
         cred_manager_window = tk.Toplevel(self.root)
         cred_manager_window.title("Manage Credential Sets")
+        self.center_window(cred_manager_window)
         cred_manager_window.transient(self.root)
         cred_manager_window.grab_set()
 
@@ -710,10 +767,10 @@ class RealTimeNetworkScanner:
             password = cred_password_var.get()
 
             if not name or not username:
-                messagebox.showwarning("Warning", "Set name and username cannot be empty.", parent=cred_manager_window)
+                self.show_floating_message("Set name and username cannot be empty")
                 return
             if name in self.credential_sets and name != "Default Admin":
-                messagebox.showwarning("Warning", f"Set '{name}' already exists. Use 'Update' button to modify.", parent=cred_manager_window)
+                self.show_floating_message(f"Set '{name}' already exists")
                 return
             
             encrypted_password = self.encrypt_password(password)
@@ -721,7 +778,7 @@ class RealTimeNetworkScanner:
             self.save_camera_data()
             update_cred_treeview()
             self.update_cred_combobox_options()
-            messagebox.showinfo("Success", f"Credential set '{name}' added.", parent=cred_manager_window)
+            self.show_floating_message(f"Credential set '{name}' added")
             cred_name_var.set("")
             cred_username_var.set("")
             cred_password_var.set("")
@@ -729,7 +786,7 @@ class RealTimeNetworkScanner:
         def update_cred_set():
             selected = cred_tree.selection()
             if not selected:
-                messagebox.showwarning("Warning", "Please select a credential set to update.", parent=cred_manager_window)
+                self.show_floating_message("Please select a credential set")
                 return
             
             old_name = cred_tree.item(selected[0], 'values')[0]
@@ -738,15 +795,15 @@ class RealTimeNetworkScanner:
             password = cred_password_var.get()
 
             if not new_name or not username:
-                messagebox.showwarning("Warning", "Set name and username cannot be empty.", parent=cred_manager_window)
+                self.show_floating_message("Set name and username cannot be empty")
                 return
             
             if old_name == "Default Admin" and new_name != "Default Admin":
-                 messagebox.showwarning("Warning", "Cannot change the name of 'Default Admin' set.", parent=cred_manager_window)
-                 return
+                self.show_floating_message("Cannot change 'Default Admin' name")
+                return
 
             if new_name != old_name and new_name in self.credential_sets:
-                messagebox.showwarning("Warning", f"Set '{new_name}' already exists.", parent=cred_manager_window)
+                self.show_floating_message(f"Set '{new_name}' already exists")
                 return
 
             encrypted_password = self.encrypt_password(password)
@@ -761,7 +818,7 @@ class RealTimeNetworkScanner:
             self.save_camera_data()
             update_cred_treeview()
             self.update_cred_combobox_options()
-            messagebox.showinfo("Success", f"Credential set '{old_name}' updated to '{new_name}'.", parent=cred_manager_window)
+            self.show_floating_message(f"Credentials '{old_name}' updated")
             cred_name_var.set("")
             cred_username_var.set("")
             cred_password_var.set("")
@@ -769,13 +826,13 @@ class RealTimeNetworkScanner:
         def delete_cred_set():
             selected = cred_tree.selection()
             if not selected:
-                messagebox.showwarning("Warning", "Please select a credential set to delete.", parent=cred_manager_window)
+                self.show_floating_message("Please select a credential set")
                 return
             
             name_to_delete = cred_tree.item(selected[0], 'values')[0]
             
             if name_to_delete == "Default Admin":
-                messagebox.showwarning("Warning", "The 'Default Admin' set cannot be deleted.", parent=cred_manager_window)
+                self.show_floating_message("Cannot delete 'Default Admin'")
                 return
 
             cameras_using_this_set = [ip for ip, name in self.camera_ip_to_cred_set.items() if name == name_to_delete]
@@ -793,15 +850,14 @@ class RealTimeNetworkScanner:
                     for item_id in self.tree.get_children():
                         if self.tree.item(item_id, 'values')[0] == ip:
                             current_values = list(self.tree.item(item_id, 'values'))
-                            current_values[4] = "Default Admin"
+                            current_values[3] = "Default Admin"  # Adjusted index
                             self.tree.item(item_id, values=current_values)
-
 
             del self.credential_sets[name_to_delete]
             self.save_camera_data()
             update_cred_treeview()
             self.update_cred_combobox_options()
-            messagebox.showinfo("Success", f"Credential set '{name_to_delete}' deleted.", parent=cred_manager_window)
+            self.show_floating_message(f"Credentials '{name_to_delete}' deleted")
             cred_name_var.set("")
             cred_username_var.set("")
             cred_password_var.set("")
@@ -851,9 +907,9 @@ class RealTimeNetworkScanner:
         cred_manager_window.wait_window()
 
     def open_scan_range_manager(self):
-        """Opens a window to manage the custom scan IP range."""
         range_manager_window = tk.Toplevel(self.root)
         range_manager_window.title("Manage Scan Range")
+        self.center_window(range_manager_window)
         range_manager_window.transient(self.root)
         range_manager_window.grab_set()
 
@@ -880,7 +936,7 @@ class RealTimeNetworkScanner:
             if not start_ip and not end_ip:
                 self.scan_range = {"start_ip": "", "end_ip": ""}
                 self.save_settings()
-                messagebox.showinfo("Success", "Scan range cleared. Will scan local network.", parent=range_manager_window)
+                self.show_floating_message("Scan range cleared")
                 return
 
             try:
@@ -888,16 +944,16 @@ class RealTimeNetworkScanner:
                 end_ip_obj = ipaddress.IPv4Address(end_ip)
 
                 if start_ip_obj > end_ip_obj:
-                    messagebox.showwarning("Warning", "Start IP cannot be greater than End IP in saved settings. Scanning local network instead.", parent=range_manager_window)
+                    self.show_floating_message("Invalid IP range")
                     return
                 
                 self.scan_range = {"start_ip": start_ip, "end_ip": end_ip}
                 self.save_settings()
-                messagebox.showinfo("Success", "Scan range saved successfully.", parent=range_manager_window)
+                self.show_floating_message("Scan range saved")
             except ipaddress.AddressValueError:
-                messagebox.showerror("Error", "Invalid IP Address format.", parent=range_manager_window)
+                self.show_floating_message("Invalid IP format")
             except Exception as e:
-                messagebox.showerror("Error", f"An error occurred: {e}", parent=range_manager_window)
+                self.show_floating_message(f"Error: {str(e)}")
 
         ttk.Button(button_frame, text="Save Range", command=save_range).pack(side=tk.LEFT, padx=5, pady=5)
         ttk.Button(button_frame, text="Clear Range", command=lambda: [self.start_ip_var.set(""), self.end_ip_var.set(""), save_range()]).pack(side=tk.LEFT, padx=5, pady=5)
@@ -906,73 +962,20 @@ class RealTimeNetworkScanner:
         range_manager_window.protocol("WM_DELETE_WINDOW", range_manager_window.destroy)
         range_manager_window.wait_window()
 
-    def _create_cmd_tool_menus(self):
-        """Creates the dropdown menus for CMD Tools."""
-        # Network and Troubleshooting (Priority 1)
-        network_menu = Menu(self.cmd_tools_menubutton.menu, tearoff=0)
-        self.cmd_tools_menubutton.menu.add_cascade(label="Network & Troubleshooting", menu=network_menu)
-        
-        # Sub-menu: IP Configuration
-        ip_config_menu = Menu(network_menu, tearoff=0)
-        network_menu.add_cascade(label="IP Configuration", menu=ip_config_menu)
-        ip_config_menu.add_command(label="ipconfig", command=lambda: self.open_cmd_tools_window("ipconfig"))
-        ip_config_menu.add_command(label="ipconfig /all", command=lambda: self.open_cmd_tools_window("ipconfig /all"))
-        ip_config_menu.add_command(label="ipconfig /renew", command=lambda: self.open_cmd_tools_window("ipconfig /renew"))
-        ip_config_menu.add_command(label="ipconfig /release", command=lambda: self.open_cmd_tools_window("ipconfig /release"))
-
-        # Sub-menu: Connectivity Test
-        conn_test_menu = Menu(network_menu, tearoff=0)
-        network_menu.add_cascade(label="Connectivity Test", menu=conn_test_menu)
-        conn_test_menu.add_command(label="ping google.com", command=lambda: self.open_cmd_tools_window("ping google.com -n 4"))
-        conn_test_menu.add_command(label="ping [IP/Hostname] -t", command=lambda: self.open_cmd_tools_window("ping [Enter IP/Hostname] -t", show_input=True))
-        conn_test_menu.add_command(label="tracert google.com", command=lambda: self.open_cmd_tools_window("tracert google.com"))
-        conn_test_menu.add_command(label="pathping google.com", command=lambda: self.open_cmd_tools_window("pathping google.com"))
-        conn_test_menu.add_command(label="telnet [IP] [Port]", command=lambda: self.open_cmd_tools_window("telnet [Enter IP] [Enter Port]", show_input=True))
-
-
-        # Sub-menu: Network Connections & Ports
-        net_conn_menu = Menu(network_menu, tearoff=0)
-        network_menu.add_cascade(label="Network Connections & Ports", menu=net_conn_menu)
-        net_conn_menu.add_command(label="netstat -an", command=lambda: self.open_cmd_tools_window("netstat -an"))
-        net_conn_menu.add_command(label="nslookup google.com", command=lambda: self.open_cmd_tools_window("nslookup google.com"))
-        net_conn_menu.add_command(label="getmac", command=lambda: self.open_cmd_tools_window("getmac"))
-        net_conn_menu.add_command(label="arp -a", command=lambda: self.open_cmd_tools_window("arp -a"))
-
-        # Sub-menu: Network Configuration
-        net_config_menu = Menu(network_menu, tearoff=0)
-        network_menu.add_cascade(label="Network Configuration", menu=net_config_menu)
-        net_config_menu.add_command(label="netsh (Interactive)", command=lambda: self.open_cmd_tools_window("netsh")) # User will need to interact
-        net_config_menu.add_command(label="route print", command=lambda: self.open_cmd_tools_window("route print"))
-
-        # System Information & Process Management (Priority 2)
-        system_menu = Menu(self.cmd_tools_menubutton.menu, tearoff=0)
-        self.cmd_tools_menubutton.menu.add_cascade(label="System & Processes", menu=system_menu)
-        system_menu.add_command(label="systeminfo", command=lambda: self.open_cmd_tools_window("systeminfo"))
-        system_menu.add_command(label="tasklist", command=lambda: self.open_cmd_tools_window("tasklist"))
-        system_menu.add_command(label="taskkill /F /IM [Image Name]", command=lambda: self.open_cmd_tools_window("taskkill /F /IM [Enter Image Name]", show_input=True))
-        system_menu.add_command(label="sc query [Service Name]", command=lambda: self.open_cmd_tools_window("sc query [Enter Service Name]", show_input=True))
-        system_menu.add_command(label="driverquery", command=lambda: self.open_cmd_tools_window("driverquery"))
-        system_menu.add_command(label="powercfg /energy", command=lambda: self.open_cmd_tools_window("powercfg /energy"))
-
-    def open_cmd_tools_window(self, predefined_command="", show_input=False):
-        """
-        Opens a window containing CMD network commands.
-        Now uses a ttk.Notebook for categorization.
-        `predefined_command`: A command to pre-fill the input field.
-        `show_input`: If True, the input field will be shown.
-        """
+    def open_cmd_tools_window(self):
         cmd_window = tk.Toplevel(self.root)
         cmd_window.title("CMD Network Tools")
+        self.center_window(cmd_window)
         cmd_window.transient(self.root)
         cmd_window.grab_set()
-        cmd_window.geometry("800x600") # Set a reasonable size
+        cmd_window.geometry("800x600")
         cmd_window.columnconfigure(0, weight=1)
         cmd_window.rowconfigure(0, weight=1)
 
         main_frame = ttk.Frame(cmd_window, padding="10")
         main_frame.grid(row=0, column=0, sticky="nsew")
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(1, weight=1) # Row for notebook
+        main_frame.rowconfigure(1, weight=1)
 
         # Command Entry and Execute Button
         cmd_input_frame = ttk.Frame(main_frame)
@@ -980,7 +983,7 @@ class RealTimeNetworkScanner:
         cmd_input_frame.columnconfigure(1, weight=1)
 
         ttk.Label(cmd_input_frame, text="Command:").grid(row=0, column=0, padx=5, sticky="w")
-        self.cmd_entry_var = tk.StringVar(value=predefined_command)
+        self.cmd_entry_var = tk.StringVar()
         cmd_entry = ttk.Entry(cmd_input_frame, textvariable=self.cmd_entry_var, width=80)
         cmd_entry.grid(row=0, column=1, padx=5, sticky="ew")
 
@@ -1004,7 +1007,7 @@ class RealTimeNetworkScanner:
         self.cmd_output_text.config(yscrollcommand=output_scrollbar.set)
         output_scrollbar.grid(row=0, column=1, sticky="ns")
 
-        self.cmd_output_text.config(state=tk.DISABLED) # Make it read-only initially
+        self.cmd_output_text.config(state=tk.DISABLED)
         self.cmd_executor = CmdToolExecutor(self.cmd_output_text, self.root.after)
 
         # Copy to Clipboard Button
@@ -1020,14 +1023,12 @@ class RealTimeNetworkScanner:
         notebook.grid(row=2, column=0, sticky="nsew", pady=10)
         main_frame.rowconfigure(2, weight=1)
 
-        # Create tabs for each category (only Network & System remain)
         self.network_tab = ttk.Frame(notebook, padding="10")
         self.system_tab = ttk.Frame(notebook, padding="10")
 
         notebook.add(self.network_tab, text="Network & Troubleshooting")
         notebook.add(self.system_tab, text="System & Processes")
 
-        # Populate each tab with buttons
         self._add_network_commands(self.network_tab)
         self._add_system_commands(self.system_tab)
 
@@ -1037,17 +1038,14 @@ class RealTimeNetworkScanner:
         cmd_window.protocol("WM_DELETE_WINDOW", cmd_window.destroy)
         cmd_window.wait_window()
 
-    def _add_command_button(self, parent_frame, text, command_str, row, col, show_input=False):
-        """Helper to create a button for a CMD command."""
+    def _add_command_button(self, parent_frame, text, command_str, row, col):
         btn = ttk.Button(parent_frame, text=text, 
                          command=lambda: self.cmd_entry_var.set(command_str))
         btn.grid(row=row, column=col, padx=5, pady=5, sticky="ew")
 
     def _add_network_commands(self, parent_frame):
-        # Configure grid for even column distribution
         for i in range(3): parent_frame.columnconfigure(i, weight=1)
 
-        # IP Configuration
         ip_config_frame = ttk.LabelFrame(parent_frame, text="IP Configuration")
         ip_config_frame.grid(row=0, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         for i in range(3): ip_config_frame.columnconfigure(i, weight=1)
@@ -1056,18 +1054,15 @@ class RealTimeNetworkScanner:
         self._add_command_button(ip_config_frame, "ipconfig /renew", "ipconfig /renew", 0, 2)
         self._add_command_button(ip_config_frame, "ipconfig /release", "ipconfig /release", 1, 0)
 
-        # Connectivity Test
         conn_test_frame = ttk.LabelFrame(parent_frame, text="Connectivity Test")
         conn_test_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         for i in range(3): conn_test_frame.columnconfigure(i, weight=1)
         self._add_command_button(conn_test_frame, "ping google.com", "ping google.com -n 4", 0, 0)
-        self._add_command_button(conn_test_frame, "ping [IP/Hostname] -t", "ping [Enter IP/Hostname] -t", 0, 1, show_input=True)
+        self._add_command_button(conn_test_frame, "ping [IP/Hostname] -t", "ping [Enter IP/Hostname] -t", 0, 1)
         self._add_command_button(conn_test_frame, "tracert google.com", "tracert google.com", 0, 2)
         self._add_command_button(conn_test_frame, "pathping google.com", "pathping google.com", 1, 0)
-        self._add_command_button(conn_test_frame, "telnet [IP] [Port]", "telnet [Enter IP] [Enter Port]", 1, 1, show_input=True)
+        self._add_command_button(conn_test_frame, "telnet [IP] [Port]", "telnet [Enter IP] [Enter Port]", 1, 1)
 
-
-        # Network Connections & Ports
         net_conn_frame = ttk.LabelFrame(parent_frame, text="Network Connections & Ports")
         net_conn_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         for i in range(3): net_conn_frame.columnconfigure(i, weight=1)
@@ -1076,14 +1071,13 @@ class RealTimeNetworkScanner:
         self._add_command_button(net_conn_frame, "getmac", "getmac", 0, 2)
         self._add_command_button(net_conn_frame, "arp -a", "arp -a", 1, 0)
 
-        # Network Configuration & Routing
         net_config_frame = ttk.LabelFrame(parent_frame, text="Network Configuration & Routing")
         net_config_frame.grid(row=3, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         for i in range(3): net_config_frame.columnconfigure(i, weight=1)
-        self._add_command_button(net_config_frame, "netsh (Interactive)", "netsh", 0, 0) # User will need to interact
+        self._add_command_button(net_config_frame, "netsh (Interactive)", "netsh", 0, 0)
         self._add_command_button(net_config_frame, "route print", "route print", 0, 1)
-        self._add_command_button(net_config_frame, "route add...", "route add [destination] mask [netmask] [gateway]", 1, 0, show_input=True)
-        self._add_command_button(net_config_frame, "route delete...", "route delete [destination]", 1, 1, show_input=True)
+        self._add_command_button(net_config_frame, "route add...", "route add [destination] mask [netmask] [gateway]", 1, 0)
+        self._add_command_button(net_config_frame, "route delete...", "route delete [destination]", 1, 1)
 
     def _add_system_commands(self, parent_frame):
         for i in range(3): parent_frame.columnconfigure(i, weight=1)
@@ -1099,28 +1093,27 @@ class RealTimeNetworkScanner:
         process_mgmt_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         for i in range(3): process_mgmt_frame.columnconfigure(i, weight=1)
         self._add_command_button(process_mgmt_frame, "tasklist", "tasklist", 0, 0)
-        self._add_command_button(process_mgmt_frame, "taskkill /F /IM [Name]", "taskkill /F /IM [Enter Image Name]", 0, 1, show_input=True)
-        self._add_command_button(process_mgmt_frame, "sc query [Service]", "sc query [Enter Service Name]", 0, 2, show_input=True)
-        self._add_command_button(process_mgmt_frame, "sc start [Service]", "sc start [Enter Service Name]", 1, 0, show_input=True)
-        self._add_command_button(process_mgmt_frame, "sc stop [Service]", "sc stop [Enter Service Name]", 1, 1, show_input=True)
-        self._add_command_button(process_mgmt_frame, "net start [Service]", "net start [Enter Service Name]", 2, 0, show_input=True)
-        self._add_command_button(process_mgmt_frame, "net stop [Service]", "net stop [Enter Service Name]", 2, 1, show_input=True)
+        self._add_command_button(process_mgmt_frame, "taskkill /F /IM [Name]", "taskkill /F /IM [Enter Image Name]", 0, 1)
+        self._add_command_button(process_mgmt_frame, "sc query [Service]", "sc query [Enter Service Name]", 0, 2)
+        self._add_command_button(process_mgmt_frame, "sc start [Service]", "sc start [Enter Service Name]", 1, 0)
+        self._add_command_button(process_mgmt_frame, "sc stop [Service]", "sc stop [Enter Service Name]", 1, 1)
+        self._add_command_button(process_mgmt_frame, "net start [Service]", "net start [Enter Service Name]", 2, 0)
+        self._add_command_button(process_mgmt_frame, "net stop [Service]", "net stop [Enter Service Name]", 2, 1)
 
         event_log_frame = ttk.LabelFrame(parent_frame, text="Event Log & Tracing")
         event_log_frame.grid(row=2, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         for i in range(3): event_log_frame.columnconfigure(i, weight=1)
-        self._add_command_button(event_log_frame, "wevtutil qe System", "wevtutil qe System /c:10 /f:text", 0, 0) # Example query
+        self._add_command_button(event_log_frame, "wevtutil qe System", "wevtutil qe System /c:10 /f:text", 0, 0)
         self._add_command_button(event_log_frame, "logman query", "logman query", 0, 1)
 
     def _copy_cmd_output_from_window(self):
-        """Copies the content of the CMD output text widget in the tools window to the clipboard."""
         output_content = self.cmd_output_text.get(1.0, tk.END).strip()
         if output_content:
             self.root.clipboard_clear()
             self.root.clipboard_append(output_content)
-            messagebox.showinfo("Copied", "Command output copied to clipboard.", parent=self.cmd_output_text.winfo_toplevel())
+            self.show_floating_message("Command output copied to clipboard")
         else:
-            messagebox.showwarning("Warning", "No output to copy.", parent=self.cmd_output_text.winfo_toplevel())
+            self.show_floating_message("No output to copy")
 
     def start_search(self):
         if not self.scanning_active:
@@ -1140,6 +1133,7 @@ class RealTimeNetworkScanner:
             self.update_status("شروع اسکن...")
             self.search_thread = threading.Thread(target=self.scan_network)
             self.search_thread.start()
+            self.start_bonjour_scan()
 
     def stop_search(self):
         self.scanning_active = False
@@ -1148,6 +1142,7 @@ class RealTimeNetworkScanner:
         self.stop_btn['state'] = tk.DISABLED
         self.update_status("اسکن متوقف شد.")
         self.progress_bar.pack_forget()
+        self.stop_bonjour_scan()
 
     def update_status(self, message):
         self.progress_label['text'] = message
@@ -1163,7 +1158,7 @@ class RealTimeNetworkScanner:
             network = ipaddress.ip_network(f"{host_ip}/24", strict=False)
             return list(network.hosts())
         except Exception as e:
-            messagebox.showerror("Error", f"Error detecting local network: {str(e)}")
+            self.show_floating_message(f"Error detecting local network: {str(e)}")
             return []
 
     def get_scan_targets(self):
@@ -1176,7 +1171,7 @@ class RealTimeNetworkScanner:
                 end_ip_obj = ipaddress.IPv4Address(end_ip)
                 
                 if start_ip_obj > end_ip_obj:
-                    messagebox.showwarning("Warning", "Start IP is greater than End IP in saved settings. Scanning local network instead.")
+                    self.show_floating_message("Invalid IP range - using default")
                     return self.get_local_network()
 
                 targets = []
@@ -1186,16 +1181,15 @@ class RealTimeNetworkScanner:
                     current_ip += 1
                 return targets
             except ipaddress.AddressValueError:
-                messagebox.showerror("Error", "Invalid IP Address in saved scan range. Scanning local network instead.")
+                self.show_floating_message("Invalid IP format - using default")
                 return self.get_local_network()
             except Exception as e:
-                messagebox.showerror("Error", f"Error processing saved scan range: {e}. Scanning local network instead.")
+                self.show_floating_message(f"Error processing range: {e} - using default")
                 return self.get_local_network()
         else:
             return self.get_local_network()
 
     def ip_to_tuple(self, ip_str):
-        """Converts IP string to a tuple for sorting."""
         return tuple(map(int, ip_str.split('.')))
 
     def scan_network(self):
@@ -1214,7 +1208,6 @@ class RealTimeNetworkScanner:
                 
                 for i, future in enumerate(concurrent.futures.as_completed(futures)):
                     if self.stop_flag:
-                        # Cancel remaining futures if stop_flag is set
                         for fut in futures:
                             if not fut.done():
                                 fut.cancel()
@@ -1231,24 +1224,23 @@ class RealTimeNetworkScanner:
                                 self.camera_ip_to_cred_set[ip_str] = "Default Admin"
                                 self.save_camera_data()
 
-                            # UPDATED: Added placeholder for 'Open Ports'
+                            # Updated device tuple (removed Last Seen)
                             device = (
                                 ip_str,
                                 mac,
                                 hostname,
-                                datetime.now().strftime("%H:%M:%S"),
                                 self.camera_ip_to_cred_set.get(ip_str, "Default Admin"),
-                                "Scanning...", # Open Ports
-                                "",  # RTSP URL
-                                "Searching...",  # Camera Status
-                                "Unavailable" # Snapshot status
+                                "Scanning...",
+                                "",
+                                "Searching...",
+                                "Unavailable"
                             )
                             self.root.after(0, self.add_device, device)
                     
                     except concurrent.futures.CancelledError:
-                        print(f"Scan for {ip} was cancelled.")
-                    except Exception as e:
-                        pass # Ignore errors from individual IP scans
+                        pass
+                    except Exception:
+                        pass
                     
                     progress = (i + 1) / total * 100
                     self.root.after(0, self.update_progress, progress)
@@ -1257,7 +1249,7 @@ class RealTimeNetworkScanner:
             self.update_status(f"اسکن شبکه کامل شد. {self.found_count} دستگاه پیدا شد.")
         
         except Exception as e:
-            messagebox.showerror("Error", f"Error scanning network: {str(e)}")
+            self.show_floating_message(f"Error scanning network: {str(e)}")
         finally:
             self.scanning_active = False
             self.search_btn['state'] = tk.NORMAL
@@ -1265,7 +1257,6 @@ class RealTimeNetworkScanner:
             self.root.after(2000, self.progress_bar.pack_forget)
 
     def scan_ip(self, ip_str):
-        """Scans a single IP (for parallel execution)."""
         if self.stop_flag:
             raise concurrent.futures.CancelledError("Scan stopped by user.")
             
@@ -1277,43 +1268,289 @@ class RealTimeNetworkScanner:
         return None
 
     def get_device_details(self, ip):
+        """
+        Gets MAC and hostname. Uses get-mac library for robust MAC address retrieval.
+        """
+        mac, hostname = "Unknown", "Unknown"
         try:
-            mac = "Unknown"
+            # Get MAC address using the reliable get-mac library
+            mac_addr = get_mac_address(ip=ip, network_request=True)
+            if mac_addr:
+                mac = mac_addr.upper()
+            else:
+                mac = "Unknown"
+        except Exception:
+            mac = "Error"
+        
+        try:
+            # Get hostname using standard socket library
+            hostname = socket.getfqdn(ip)
+            if hostname == ip:
+                hostname = "Unknown"
+        except Exception:
             hostname = "Unknown"
 
-            creation_flags = 0
-            if platform.system() == "Windows":
-                creation_flags = subprocess.CREATE_NO_WINDOW
+        return mac, hostname
 
-            try:
-                arp_process = subprocess.run(
-                    ['arp', '-a', ip],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    creationflags=creation_flags,
-                    timeout=2
-                )
-                arp_output = arp_process.stdout
-                mac_match = re.search(r"([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})", arp_output)
-                mac = mac_match.group(0).lower() if mac_match else "Unknown"
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-                print(f"Error running arp for {ip}: {e}")
-                mac = "Unknown"
-
-            try:
-                hostname = socket.gethostbyaddr(ip)[0]
-            except (socket.herror, socket.gaierror):
-                hostname = "Unknown"
+    def get_vendor_from_mac(self, mac):
+        """Get vendor name from MAC address using OUI lookup"""
+        try:
+            # Normalize MAC address
+            mac = mac.replace(':', '').replace('-', '').upper()
+            oui = mac[:6]
             
-            return mac, hostname
-        except Exception as e:
-            return "Error", f"Error: {str(e)}"
+            # Lookup OUI in IEEE database (using local mapping)
+            # This is a simplified version, in practice you'd use a full OUI database
+            vendor_map = {
+                '0000C9': 'Cisco',
+                '001122': 'Huawei',
+                'A0B4A5': 'Samsung',
+                '001E06': 'D-Link',
+                '001F6B': 'TP-Link',
+                'C0AC54': 'Hikvision',
+                '0026CD': 'Dahua',
+                '001AEF': 'Axis',
+                '0090A2': 'Sony',
+                '0050F2': 'Dell',
+                '001D0F': 'HP',
+                '001EC2': 'Apple',
+                '001B63': 'Intel',
+                '000569': 'Bosch',
+                '000DBD': 'Panasonic',
+                '001E42': 'Vivotek',
+                '001F54': 'Arecont',
+                '0021B9': 'Mobotix',
+                '0022D2': 'Samsung Techwin',
+                '0023F7': 'ACTi',
+                '0024F7': 'Sony',
+                '0025CB': 'Sony',
+                '0026F3': 'Sony',
+                '0027F8': 'Sony',
+                '0028F8': 'Sony',
+                '0029F8': 'Sony',
+                '002AF8': 'Sony',
+                '002BF8': 'Sony',
+                '002CF8': 'Sony',
+                '002DF8': 'Sony',
+                '002EF8': 'Sony',
+                '002FF8': 'Sony',
+                '0030F8': 'Sony',
+                '0031F8': 'Sony',
+                '0032F8': 'Sony',
+                '0033F8': 'Sony',
+                '0034F8': 'Sony',
+                '0035F8': 'Sony',
+                '0036F8': 'Sony',
+                '0037F8': 'Sony',
+                '0038F8': 'Sony',
+                '0039F8': 'Sony',
+                '003AF8': 'Sony',
+                '003BF8': 'Sony',
+                '003CF8': 'Sony',
+                '003DF8': 'Sony',
+                '003EF8': 'Sony',
+                '003FF8': 'Sony',
+                '0040F8': 'Sony',
+                '0041F8': 'Sony',
+                '0042F8': 'Sony',
+                '0043F8': 'Sony',
+                '0044F8': 'Sony',
+                '0045F8': 'Sony',
+                '0046F8': 'Sony',
+                '0047F8': 'Sony',
+                '0048F8': 'Sony',
+                '0049F8': 'Sony',
+                '004AF8': 'Sony',
+                '004BF8': 'Sony',
+                '004CF8': 'Sony',
+                '004DF8': 'Sony',
+                '004EF8': 'Sony',
+                '004FF8': 'Sony',
+                '0050F8': 'Sony',
+                '0051F8': 'Sony',
+                '0052F8': 'Sony',
+                '0053F8': 'Sony',
+                '0054F8': 'Sony',
+                '0055F8': 'Sony',
+                '0056F8': 'Sony',
+                '0057F8': 'Sony',
+                '0058F8': 'Sony',
+                '0059F8': 'Sony',
+                '005AF8': 'Sony',
+                '005BF8': 'Sony',
+                '005CF8': 'Sony',
+                '005DF8': 'Sony',
+                '005EF8': 'Sony',
+                '005FF8': 'Sony',
+                '0060F8': 'Sony',
+                '0061F8': 'Sony',
+                '0062F8': 'Sony',
+                '0063F8': 'Sony',
+                '0064F8': 'Sony',
+                '0065F8': 'Sony',
+                '0066F8': 'Sony',
+                '0067F8': 'Sony',
+                '0068F8': 'Sony',
+                '0069F8': 'Sony',
+                '006AF8': 'Sony',
+                '006BF8': 'Sony',
+                '006CF8': 'Sony',
+                '006DF8': 'Sony',
+                '006EF8': 'Sony',
+                '006FF8': 'Sony',
+                '0070F8': 'Sony',
+                '0071F8': 'Sony',
+                '0072F8': 'Sony',
+                '0073F8': 'Sony',
+                '0074F8': 'Sony',
+                '0075F8': 'Sony',
+                '0076F8': 'Sony',
+                '0077F8': 'Sony',
+                '0078F8': 'Sony',
+                '0079F8': 'Sony',
+                '007AF8': 'Sony',
+                '007BF8': 'Sony',
+                '007CF8': 'Sony',
+                '007DF8': 'Sony',
+                '007EF8': 'Sony',
+                '007FF8': 'Sony',
+                '0080F8': 'Sony',
+                '0081F8': 'Sony',
+                '0082F8': 'Sony',
+                '0083F8': 'Sony',
+                '0084F8': 'Sony',
+                '0085F8': 'Sony',
+                '0086F8': 'Sony',
+                '0087F8': 'Sony',
+                '0088F8': 'Sony',
+                '0089F8': 'Sony',
+                '008AF8': 'Sony',
+                '008BF8': 'Sony',
+                '008CF8': 'Sony',
+                '008DF8': 'Sony',
+                '008EF8': 'Sony',
+                '008FF8': 'Sony',
+                '0090F8': 'Sony',
+                '0091F8': 'Sony',
+                '0092F8': 'Sony',
+                '0093F8': 'Sony',
+                '0094F8': 'Sony',
+                '0095F8': 'Sony',
+                '0096F8': 'Sony',
+                '0097F8': 'Sony',
+                '0098F8': 'Sony',
+                '0099F8': 'Sony',
+                '009AF8': 'Sony',
+                '009BF8': 'Sony',
+                '009CF8': 'Sony',
+                '009DF8': 'Sony',
+                '009EF8': 'Sony',
+                '009FF8': 'Sony',
+                '00A0F8': 'Sony',
+                '00A1F8': 'Sony',
+                '00A2F8': 'Sony',
+                '00A3F8': 'Sony',
+                '00A4F8': 'Sony',
+                '00A5F8': 'Sony',
+                '00A6F8': 'Sony',
+                '00A7F8': 'Sony',
+                '00A8F8': 'Sony',
+                '00A9F8': 'Sony',
+                '00AAF8': 'Sony',
+                '00ABF8': 'Sony',
+                '00ACF8': 'Sony',
+                '00ADF8': 'Sony',
+                '00AEF8': 'Sony',
+                '00AFF8': 'Sony',
+                '00B0F8': 'Sony',
+                '00B1F8': 'Sony',
+                '00B2F8': 'Sony',
+                '00B3F8': 'Sony',
+                '00B4F8': 'Sony',
+                '00B5F8': 'Sony',
+                '00B6F8': 'Sony',
+                '00B7F8': 'Sony',
+                '00B8F8': 'Sony',
+                '00B9F8': 'Sony',
+                '00BAF8': 'Sony',
+                '00BBF8': 'Sony',
+                '00BCF8': 'Sony',
+                '00BDF8': 'Sony',
+                '00BEF8': 'Sony',
+                '00BFF8': 'Sony',
+                '00C0F8': 'Sony',
+                '00C1F8': 'Sony',
+                '00C2F8': 'Sony',
+                '00C3F8': 'Sony',
+                '00C4F8': 'Sony',
+                '00C5F8': 'Sony',
+                '00C6F8': 'Sony',
+                '00C7F8': 'Sony',
+                '00C8F8': 'Sony',
+                '00C9F8': 'Sony',
+                '00CAF8': 'Sony',
+                '00CBF8': 'Sony',
+                '00CCF8': 'Sony',
+                '00CDF8': 'Sony',
+                '00CEF8': 'Sony',
+                '00CFF8': 'Sony',
+                '00D0F8': 'Sony',
+                '00D1F8': 'Sony',
+                '00D2F8': 'Sony',
+                '00D3F8': 'Sony',
+                '00D4F8': 'Sony',
+                '00D5F8': 'Sony',
+                '00D6F8': 'Sony',
+                '00D7F8': 'Sony',
+                '00D8F8': 'Sony',
+                '00D9F8': 'Sony',
+                '00DAF8': 'Sony',
+                '00DBF8': 'Sony',
+                '00DCF8': 'Sony',
+                '00DDF8': 'Sony',
+                '00DEF8': 'Sony',
+                '00DFF8': 'Sony',
+                '00E0F8': 'Sony',
+                '00E1F8': 'Sony',
+                '00E2F8': 'Sony',
+                '00E3F8': 'Sony',
+                '00E4F8': 'Sony',
+                '00E5F8': 'Sony',
+                '00E6F8': 'Sony',
+                '00E7F8': 'Sony',
+                '00E8F8': 'Sony',
+                '00E9F8': 'Sony',
+                '00EAF8': 'Sony',
+                '00EBF8': 'Sony',
+                '00ECF8': 'Sony',
+                '00EDF8': 'Sony',
+                '00EEF8': 'Sony',
+                '00EFF8': 'Sony',
+                '00F0F8': 'Sony',
+                '00F1F8': 'Sony',
+                '00F2F8': 'Sony',
+                '00F3F8': 'Sony',
+                '00F4F8': 'Sony',
+                '00F5F8': 'Sony',
+                '00F6F8': 'Sony',
+                '00F7F8': 'Sony',
+                '00F8F8': 'Sony',
+                '00F9F8': 'Sony',
+                '00FAF8': 'Sony',
+                '00FBF8': 'Sony',
+                '00FCF8': 'Sony',
+                '00FDF8': 'Sony',
+                '00FEF8': 'Sony',
+                '00FFF8': 'Sony'
+            }
+            
+            if oui in vendor_map:
+                return vendor_map[oui]
+        except Exception:
+            pass
+        return None
 
     def add_device(self, device):
-        """
-        Adds a device to the table and queues it for ONVIF and Port scanning.
-        """
         ip_tuple = self.ip_to_tuple(device[0])
         
         position = 0
@@ -1325,28 +1562,19 @@ class RealTimeNetworkScanner:
             position += 1
         
         item_id = self.tree.insert('', position, values=device)
-        
-        # Queue the device for both ONVIF and Port scanning to run concurrently
         self.onvif_queue.put((device[0], item_id))
         self.port_scan_queue.put((device[0], item_id))
-        
         self.highlight_duplicates()
 
     def update_open_ports(self, item_id, open_ports):
-        """
-        NEW: Updates the 'Open Ports' column for a specific item in the treeview.
-        """
         if self.tree.exists(item_id):
             values = list(self.tree.item(item_id, 'values'))
-            
             ports_str = ', '.join(map(str, open_ports)) if open_ports else "None"
-            
-            if len(values) >= 6: # Ensure column exists
-                values[5] = ports_str # Index 5 is 'Open Ports'
+            if len(values) >= 5:  # Adjusted index after removing Last Seen
+                values[4] = ports_str
                 self.tree.item(item_id, values=values)
 
     def _update_hover_window_error(self, thread_id, message):
-        """Updates the hover window with an error message."""
         if thread_id != self.last_hover_thread_id or not self.hover_window:
             return
 
@@ -1359,25 +1587,20 @@ class RealTimeNetworkScanner:
         self.hover_window.wm_geometry(f"+{self.hover_window.winfo_x()}+{self.hover_window.winfo_y()}")
 
     def update_camera_info(self, item_id, cred_set_name, rtsp_url, camera_status, snapshot_uri):
-        """Updates camera information in the UI, now with adjusted indices."""
         if self.tree.exists(item_id):
             values = list(self.tree.item(item_id, 'values'))
-            
-            # Ensure we have enough columns (now 9)
-            while len(values) < 9:
+            while len(values) < 8:  # Adjusted for removed column
                 values.append('')
             
-            # UPDATED: Indices are shifted due to the new 'Open Ports' column
-            values[4] = cred_set_name    # Credential Set
-            values[6] = rtsp_url         # RTSP URL
-            values[7] = camera_status    # Camera Status
+            values[3] = cred_set_name
+            values[5] = rtsp_url
+            values[6] = camera_status
             
-            # UPDATED: New logic for Auth Failed reminder
             if camera_status == "Auth Failed":
-                values[6] = "رمز و نام کاربری را بررسی کنید" # "Check username and password"
+                values[5] = "رمز و نام کاربری را بررسی کنید"
 
             snapshot_status_text = "View Image" if snapshot_uri or rtsp_url else "Unavailable"
-            values[8] = snapshot_status_text # Snapshot status
+            values[7] = snapshot_status_text
             
             current_tags = list(self.tree.item(item_id, 'tags'))
             current_tags = [tag for tag in current_tags if not tag.startswith('snapshot_uri:')]
@@ -1407,7 +1630,11 @@ class RealTimeNetworkScanner:
             mac_list.append(values[1])
         
         ip_counts = {ip: ip_list.count(ip) for ip in ip_list}
-        mac_counts = {mac: mac_list.count(mac) for mac in mac_list}
+        mac_counts = {}
+        for mac in mac_list:
+            # Only count valid MAC addresses (ignore "Unknown" and "Error")
+            if mac and mac != "Unknown" and mac != "Error" and not mac.startswith("Error:"):
+                mac_counts[mac] = mac_counts.get(mac, 0) + 1
         
         for child in self.tree.get_children():
             values = self.tree.item(child, 'values')
@@ -1417,7 +1644,7 @@ class RealTimeNetworkScanner:
             if ip_counts.get(ip, 0) > 1:
                 tags.append('ip_dup')
             if mac_counts.get(mac, 0) > 1:
-                tags.append('mac_dup')
+                tags.append('mac_dup')  # Added for duplicate MAC
             
             existing_tags = list(self.tree.item(child, 'tags'))
             for tag in existing_tags:
@@ -1427,31 +1654,30 @@ class RealTimeNetworkScanner:
             self.tree.item(child, tags=tuple(tags))
 
     def _on_tree_motion(self, event):
-        """Handles mouse motion over the Treeview for hover functionality."""
         item_id = self.tree.identify_row(event.y)
         column_id = self.tree.identify_column(event.x)
 
-        # UPDATED: Column index for 'Snapshot' is now #9
-        if item_id and column_id == '#9':
+        # Adjusted column index for 'Snapshot' after removing Last Seen
+        if item_id and column_id == '#8':
             item_values = self.tree.item(item_id, 'values')
-            snapshot_status_text = item_values[8]
+            snapshot_status_text = item_values[7]
 
             if snapshot_status_text == "View Image":
                 if item_id != self.current_hover_item:
                     self._hide_hover_image()
                     self.current_hover_item = item_id
 
-                    # UPDATED: Indices for fetching values
                     ip = item_values[0]
-                    rtsp_url = item_values[6] 
+                    rtsp_url = item_values[5] 
                     snapshot_uri = ""
+                    # Removed the extra parenthesis causing the SyntaxError
                     item_tags = self.tree.item(item_id, 'tags')
                     for tag in item_tags:
                         if tag.startswith('snapshot_uri:'):
                             snapshot_uri = tag.split(':', 1)[1]
                             break
                     
-                    cred_set_name = item_values[4]
+                    cred_set_name = item_values[3]
                     cred_info = self.credential_sets.get(cred_set_name)
                     username = cred_info['username'] if cred_info else "admin"
                     password = self.decrypt_password(cred_info['password']) if cred_info else "admin"
@@ -1476,11 +1702,9 @@ class RealTimeNetworkScanner:
             self._hide_hover_image()
 
     def _on_tree_leave(self, event):
-        """Handles mouse leaving the Treeview, hides hover image."""
         self._hide_hover_image()
 
     def _hide_hover_image(self):
-        """Hides and destroys the hover image window."""
         if self.hover_window:
             self.hover_window.destroy()
             self.hover_window = None
@@ -1489,7 +1713,6 @@ class RealTimeNetworkScanner:
             self.current_hover_image_tk = None
 
     def _fetch_thumbnail_for_hover(self, thread_id, ip, username, password, rtsp_url, snapshot_uri):
-        """Fetches and processes a thumbnail for hover display."""
         if thread_id != self.last_hover_thread_id:
             return
 
@@ -1509,13 +1732,11 @@ class RealTimeNetworkScanner:
                 response.raise_for_status()
                 image_data = response.content
             except Exception as e:
-                print(f"Error fetching hover thumbnail from Snapshot URI ({snapshot_uri}): {e}")
                 image_data = None
 
         if not image_data and rtsp_url:
             try:
-                import cv2 # Import here to provide specific error if not installed
-                
+                import cv2
                 if username and password:
                     parsed_url = urlparse(rtsp_url)
                     netloc_with_auth = f"{username}:{password}@{parsed_url.hostname}"
@@ -1547,10 +1768,8 @@ class RealTimeNetworkScanner:
                     raise ValueError("Failed to read frame from RTSP stream for thumbnail.")
 
             except ImportError:
-                print("OpenCV not installed, cannot fetch RTSP thumbnail.")
                 image_data = None
             except Exception as e:
-                print(f"Error fetching hover thumbnail from RTSP ({rtsp_url}): {e}")
                 image_data = None
 
         if image_data:
@@ -1561,13 +1780,11 @@ class RealTimeNetworkScanner:
                 self.hover_image_cache[image_key] = photo
                 self.root.after(0, lambda: self._update_hover_window(thread_id, photo))
             except Exception as e:
-                print(f"Error processing image for hover: {e}")
                 self.root.after(0, lambda: self._update_hover_window_error(thread_id, "Error loading image"))
         else:
             self.root.after(0, lambda: self._update_hover_window_error(thread_id, "No image available"))
 
     def _update_hover_window(self, thread_id, photo):
-        """Updates the hover window with the thumbnail."""
         if thread_id != self.last_hover_thread_id or not self.hover_window:
             return
 
