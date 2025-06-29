@@ -2,7 +2,7 @@
 
 # اسکنر شبکه - ابزار کشف دوربین‌های ONVIF
 
-![Network Scanner](https://lh3.googleusercontent.com/d/1IZMiReIzlq9Ed6IEhG6tVhbh_AvIvm8I)
+![Network Scanner](https://lh3.googleusercontent.com/d/1CKFrJd7JqaG0WHdiiQLBCpWzPN00jsYz)
 
 **راهکاری هوشمند برای مدیریت و کشف خودکار دوربین‌های مداربسته در شبکه**
 
