@@ -22,12 +22,17 @@ from zeroconf import ServiceBrowser, Zeroconf, ServiceListener
 from getmac import get_mac_address
 import re
 import cv2
+import time
 
 # --- New Imports for Updates ---
 from ttkthemes import ThemedTk
 
 # Global variable for the fixed encryption key
 FIXED_ENCRYPTION_KEY = b'v8VZkq4W9E7RjTzOYKbLwSdXyGfChN3s1Mn2PpI0Qt6='
+
+# Current software version
+SOFTWARE_VERSION = "v0.7"
+GITHUB_REPO_URL = "https://github.com/intellsoft/cctv-camera-finder"
 
 class BonjourListener(ServiceListener):
     """Listener for Bonjour/mDNS service discovery"""
@@ -527,6 +532,15 @@ class RealTimeNetworkScanner:
         # Add categories and commands to the menu
         self._create_cmd_tool_menus()
 
+        # افزودن دکمه جدید برای نمایش تصاویر (در انتها)
+        self.view_thumbnails_btn = ttk.Button(
+            control_frame,
+            text="View Camera Thumbnails",
+            command=self.show_camera_thumbnails,
+            state=tk.DISABLED  # Initially disabled
+        )
+        self.view_thumbnails_btn.pack(side=tk.LEFT, padx=5)
+
         # Progress Section
         self.progress_frame = ttk.Frame(main_frame)
         self.progress_frame.pack(fill=tk.X, pady=5)
@@ -664,6 +678,118 @@ class RealTimeNetworkScanner:
         for theme in sorted(self.root.get_themes()):
             theme_menu.add_command(label=theme, command=lambda t=theme: self.change_theme(t))
             
+        # Help Menu
+        help_menu = Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Help", menu=help_menu)
+        help_menu.add_command(label="About", command=self.show_about)
+            
+    def show_about(self):
+        """Shows the About dialog with software information and update check"""
+        about_window = tk.Toplevel(self.root)
+        about_window.title("About")
+        about_window.geometry("450x250")
+        self.center_window(about_window)
+        about_window.resizable(False, False)
+        about_window.transient(self.root)
+        about_window.grab_set()
+        
+        # Main frame
+        main_frame = ttk.Frame(about_window, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Software name
+        ttk.Label(
+            main_frame, 
+            text="جستجوی پیشرفته دوربین مداربسته در شبکه",
+            font=("Arial", 12, "bold")
+        ).pack(pady=(0, 10))
+        
+        # Developer
+        ttk.Label(
+            main_frame, 
+            text="برنامه نویس: محمدعلی عباسپور",
+            font=("Arial", 10)
+        ).pack(pady=(0, 10))
+        
+        # Website link
+        website_frame = ttk.Frame(main_frame)
+        website_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(website_frame, text="وب سایت:").pack(side=tk.LEFT)
+        website_link = ttk.Label(
+            website_frame, 
+            text="https://intellsoft.ir", 
+            foreground="blue", 
+            cursor="hand2"
+        )
+        website_link.pack(side=tk.LEFT, padx=5)
+        website_link.bind("<Button-1>", lambda e: webbrowser.open("https://intellsoft.ir"))
+        
+        # GitHub link
+        github_frame = ttk.Frame(main_frame)
+        github_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(github_frame, text="گیت هاب:").pack(side=tk.LEFT)
+        github_link = ttk.Label(
+            github_frame, 
+            text="https://github.com/intellsoft/cctv-camera-finder", 
+            foreground="blue", 
+            cursor="hand2"
+        )
+        github_link.pack(side=tk.LEFT, padx=5)
+        github_link.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/intellsoft/cctv-camera-finder"))
+        
+        # Version
+        ttk.Label(
+            main_frame, 
+            text=f"نسخه نرم افزار: {SOFTWARE_VERSION}",
+            font=("Arial", 9)
+        ).pack(pady=10)
+        
+        # Update status
+        self.update_status_label = ttk.Label(
+            main_frame, 
+            text="در حال بررسی نسخه جدید...",
+            font=("Arial", 9)
+        )
+        self.update_status_label.pack(pady=5)
+        
+        # Close button
+        ttk.Button(
+            main_frame,
+            text="Close",
+            command=about_window.destroy
+        ).pack(pady=10)
+        
+        # Check for updates in background
+        threading.Thread(target=self.check_for_updates, args=(about_window,), daemon=True).start()
+
+    def check_for_updates(self, about_window):
+        """Checks for software updates on GitHub"""
+        try:
+            # Get the latest release from GitHub
+            api_url = "https://api.github.com/repos/intellsoft/cctv-camera-finder/releases/latest"
+            response = requests.get(api_url, timeout=5)
+            
+            if response.status_code == 200:
+                release_data = response.json()
+                latest_version = release_data['tag_name']
+                
+                # Compare versions
+                if latest_version > SOFTWARE_VERSION:
+                    message = f"نسخه جدید {latest_version} موجود است!"
+                    color = "green"
+                else:
+                    message = "شما از آخرین نسخه استفاده می‌کنید"
+                    color = "black"
+            else:
+                message = "بررسی نسخه جدید ناموفق بود"
+                color = "red"
+        except Exception:
+            message = "عدم اتصال به اینترنت"
+            color = "red"
+        
+        # Update the UI in the main thread
+        about_window.after(0, lambda: self.update_status_label.config(text=message, foreground=color))
+
     def change_theme(self, theme_name):
         try:
             self.root.set_theme(theme_name)
@@ -1315,6 +1441,7 @@ class RealTimeNetworkScanner:
         self.update_status("Starting network scan...")
         self.search_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self.view_thumbnails_btn.config(state=tk.DISABLED)  # Disable until cameras found
         
         self.search_thread = threading.Thread(target=self._run_search_in_thread, daemon=True)
         self.search_thread.start()
@@ -1460,8 +1587,19 @@ class RealTimeNetworkScanner:
             
             # Update the tree item
             self.tree.item(item_id, values=current_values, tags=current_tags)
+            
+            # Enable/disable the thumbnails button based on valid cameras
+            self.update_thumbnails_button_state()
         else:
             print("Invalid values length in update_camera_info")
+    
+    def update_thumbnails_button_state(self):
+        """Updates the state of the view thumbnails button"""
+        has_valid_camera = any(
+            self.tree.item(item, 'values')[5] == "ONVIF Found" 
+            for item in self.tree.get_children()
+        )
+        self.view_thumbnails_btn.config(state=tk.NORMAL if has_valid_camera else tk.DISABLED)
 
     def update_open_ports(self, item_id, open_ports):
         """Updates the Open Ports column in the treeview."""
@@ -1508,6 +1646,7 @@ class RealTimeNetworkScanner:
         self.update_status(f"Scan finished. Found {self.found_count} devices.")
         self.progress_bar['value'] = 100
         self.show_floating_message(f"Scan finished. Found {self.found_count} devices.")
+        self.update_thumbnails_button_state()
 
     def filter_results(self, event=None):
         query = self.search_var.get().lower()
@@ -1749,8 +1888,181 @@ class RealTimeNetworkScanner:
                 self.add_device_to_tree(device_data) 
             
             self.update_status(f"Project loaded. {self.found_count} devices.")
+            self.update_thumbnails_button_state()
         except Exception as e:
             self.show_floating_message(f"Error loading project: {e}")
+
+    # +++ NEW METHOD: Show camera thumbnails +++
+    def show_camera_thumbnails(self):
+        """Displays thumbnails of all valid cameras in a grid view"""
+        # Collect valid cameras
+        valid_cameras = []
+        for item_id in self.tree.get_children():
+            values = self.tree.item(item_id, 'values')
+            if values[5] == "ONVIF Found" and values[4]:  # ONVIF Found and has RTSP
+                ip = values[0]
+                rtsp_url = values[4]
+                
+                # Find credentials
+                cred_set_name = self.camera_ip_to_cred_set.get(ip, "Default Admin")
+                cred_info = self.credential_sets.get(cred_set_name)
+                username = cred_info['username'] if cred_info else "admin"
+                password = self.decrypt_password(cred_info['password']) if cred_info else "admin"
+                
+                valid_cameras.append({
+                    'ip': ip,
+                    'rtsp_url': rtsp_url,
+                    'username': username,
+                    'password': password
+                })
+        
+        if not valid_cameras:
+            messagebox.showinfo("No Cameras", "No valid cameras found with RTSP streams")
+            return
+        
+        # Create new window
+        thumbnails_window = tk.Toplevel(self.root)
+        thumbnails_window.title("Camera Thumbnails")
+        thumbnails_window.geometry("1200x800")
+        self.center_window(thumbnails_window)
+        
+        # Create scrollable frame
+        canvas = tk.Canvas(thumbnails_window)
+        scrollbar = ttk.Scrollbar(thumbnails_window, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Grid settings
+        COLS = 4  # Number of columns
+        MAX_PER_ROW = COLS
+        row, col = 0, 0
+        
+        # List to store image references
+        image_references = []
+        
+        # Create status label
+        status_label = ttk.Label(thumbnails_window, text="Loading thumbnails...")
+        status_label.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Function to load and display thumbnails
+        def load_thumbnails():
+            nonlocal row, col
+            total = len(valid_cameras)
+            loaded = 0
+            
+            for camera in valid_cameras:
+                try:
+                    # Fetch thumbnail
+                    img = self.get_camera_thumbnail(
+                        camera['ip'],
+                        camera['username'],
+                        camera['password'],
+                        camera['rtsp_url']
+                    )
+                    
+                    if img:
+                        # Resize image
+                        img.thumbnail((250, 200))
+                        photo = ImageTk.PhotoImage(img)
+                        image_references.append(photo)  # Keep reference
+                        
+                        # Create frame for camera
+                        cam_frame = ttk.Frame(scrollable_frame)
+                        cam_frame.grid(row=row, column=col, padx=10, pady=10)
+                        
+                        # Display image
+                        img_label = ttk.Label(cam_frame, image=photo)
+                        img_label.image = photo  # Keep reference
+                        img_label.pack()
+                        
+                        # Display IP
+                        ip_label = ttk.Label(cam_frame, text=camera['ip'])
+                        ip_label.pack()
+                        
+                        # Update position
+                        col += 1
+                        if col >= MAX_PER_ROW:
+                            col = 0
+                            row += 1
+                    
+                    loaded += 1
+                    status_label.config(text=f"Loaded {loaded}/{total} thumbnails")
+                    thumbnails_window.update()
+                
+                except Exception as e:
+                    print(f"Error loading thumbnail for {camera['ip']}: {e}")
+            
+            status_label.config(text=f"Completed: {loaded}/{total} thumbnails loaded")
+        
+        # Start loading in a separate thread
+        threading.Thread(target=load_thumbnails, daemon=True).start()
+    
+    def get_camera_thumbnail(self, ip, username, password, rtsp_url):
+        """Gets a thumbnail image from the camera"""
+        # Priority 1: Use Snapshot URI if available
+        snapshot_uri = None
+        for item_id in self.tree.get_children():
+            values = self.tree.item(item_id, 'values')
+            if values[0] == ip:
+                tags = self.tree.item(item_id, 'tags')
+                for tag in tags:
+                    if tag.startswith('snapshot_uri:'):
+                        snapshot_uri = tag.split(':', 1)[1]
+                        break
+                break
+        
+        if snapshot_uri:
+            try:
+                auth = (username, password) if username and password else None
+                response = requests.get(snapshot_uri, auth=auth, timeout=3)
+                response.raise_for_status()
+                return Image.open(io.BytesIO(response.content))
+            except Exception as e:
+                print(f"Snapshot URI failed for {ip}: {e}")
+        
+        # Priority 2: Use RTSP stream
+        try:
+            # Add credentials to URL if needed
+            if username and password:
+                parsed_url = urlparse(rtsp_url)
+                netloc_with_auth = f"{username}:{password}@{parsed_url.hostname}"
+                if parsed_url.port:
+                    netloc_with_auth += f":{parsed_url.port}"
+                rtsp_url = parsed_url._replace(netloc=netloc_with_auth).geturl()
+            
+            # Capture frame from stream
+            cap = cv2.VideoCapture(rtsp_url)
+            if not cap.isOpened():
+                raise ConnectionError("Cannot open RTSP stream")
+            
+            # Try to get a frame
+            ret, frame = False, None
+            for _ in range(5):  # Try multiple times
+                ret, frame = cap.read()
+                if ret:
+                    break
+            
+            cap.release()
+            
+            if ret and frame is not None:
+                # Convert to PIL Image
+                return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            else:
+                raise ValueError("Failed to capture frame from RTSP")
+                
+        except Exception as e:
+            print(f"RTSP capture failed for {ip}: {e}")
+            return None
 
 if __name__ == "__main__":
     root = ThemedTk(theme="arc")
