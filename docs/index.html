@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="fa">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نرم افزار شناسایی دوربین مداربسته و onvif در شبکه</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #f8f9fa;
+            color: #333;
+            line-height: 1.7;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        header {
+            text-align: center;
+            background: linear-gradient(135deg, #ff7b00, #ff5500);
+            color: white;
+            padding: 40px 20px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        h1 {
+            font-size: 32px;
+            margin-bottom: 15px;
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.3);
+        }
+        .subtitle {
+            font-size: 20px;
+            max-width: 700px;
+            margin: 0 auto;
+        }
+        h2 {
+            color: #ff5500;
+            border-bottom: 2px solid #ff7b00;
+            padding-bottom: 10px;
+            margin: 35px 0 20px;
+            font-size: 26px;
+        }
+        .section-box {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            margin: 25px 0;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+            border: 1px solid #eaeaea;
+        }
+        .step-box {
+            background: #fff4e6;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            border-left: 4px solid #ff7b00;
+        }
+        .step-number {
+            background: #ff7b00;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: 10px;
+            font-weight: bold;
+            font-size: 20px;
+        }
+        .important-note {
+            background: #fff8e6;
+            border-left: 4px solid #ffc107;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 25px 0;
+            font-size: 18px;
+        }
+        .btn {
+            display: inline-block;
+            background: #ff7b00;
+            color: white;
+            padding: 14px 30px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: bold;
+            margin: 15px 0;
+            transition: all 0.3s;
+            font-size: 18px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .btn:hover {
+            background: #ff5500;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 8px rgba(0,0,0,0.15);
+        }
+        .btn-download {
+            background: #ff7b00;
+            font-size: 20px;
+            padding: 16px 35px;
+        }
+        .btn-download:hover {
+            background: #ff5500;
+        }
+        footer {
+            text-align: center;
+            margin-top: 50px;
+            padding: 30px;
+            border-top: 1px solid #ddd;
+            color: #666;
+            font-size: 16px;
+        }
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .feature-card {
+            background: #fff4e6;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 3px 8px rgba(0,0,0,0.05);
+            transition: transform 0.3s;
+        }
+        .feature-card:hover {
+            transform: translateY(-5px);
+        }
+        .feature-icon {
+            font-size: 40px;
+            margin-bottom: 15px;
+            color: #ff7b00;
+        }
+        .use-cases {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .use-case {
+            background: #fff4e6;
+            border-radius: 8px;
+            padding: 15px;
+            flex: 1;
+            min-width: 200px;
+            border-left: 3px solid #ff7b00;
+        }
+        @media (max-width: 768px) {
+            body {
+                padding: 15px;
+            }
+            h1 {
+                font-size: 26px;
+            }
+            .subtitle {
+                font-size: 18px;
+            }
+            .btn {
+                width: 100%;
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>اسکنر شبکه - ابزار کشف دوربین‌های ONVIF</h1>
+        <p class="subtitle">راهکاری هوشمند برای مدیریت و کشف خودکار دوربین‌های مداربسته در شبکه</p>
+        <a href="https://github.com/intellsoft/cctv-camera-finder/releases/latest" class="btn btn-download">دانلود آخرین نسخه</a>
+    </header>
+
+    <section class="section-box">
+        <h2>نرم‌افزار اسکنر شبکه چیست؟</h2>
+        <p>این نرم‌افزار ابزاری تخصصی برای شناسایی خودکار دوربین‌های مداربسته در شبکه شماست. با استفاده از این برنامه می‌توانید:</p>
+        <ul style="padding-right: 20px; margin-top: 15px;">
+            <li>تمام دوربین‌های فعال در شبکه را کشف کنید</li>
+            <li>اطلاعات فنی دستگاه‌ها را مشاهده نمایید</li>
+            <li>مشکلات اتصال را تشخیص دهید</li>
+            <li>گزارش حرفه‌ای از تجهیزات تهیه کنید</li>
+        </ul>
+    </section>
+
+    <section class="section-box">
+        <h2>ویژگی‌های اصلی</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <div class="feature-icon">🔍</div>
+                <h3>اسکن هوشمند</h3>
+                <p>شناسایی خودکار دوربین‌های فعال در شبکه</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">📷</div>
+                <h3>پشتیبانی ONVIF</h3>
+                <p>کشف دوربین‌های سازگار با استاندارد جهانی</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🔒</div>
+                <h3>مدیریت امن</h3>
+                <p>ذخیره ایمن اطلاعات ورود به دستگاه‌ها</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">📊</div>
+                <h3>گزارش حرفه‌ای</h3>
+                <p>خروجی اکسل با فرمت‌بندی پیشرفته</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="section-box">
+        <h2>کاربردهای نرم‌افزار</h2>
+        <div class="use-cases">
+            <div class="use-case">
+                <h4>🔧 نصب و راه‌اندازی</h4>
+                <p>شناسایی سریع دوربین‌ها در شبکه هنگام نصب سیستم‌های جدید</p>
+            </div>
+            <div class="use-case">
+                <h4>🛠️ عیب‌یابی</h4>
+                <p>تشخیص مشکلات اتصال و تنظیمات دوربین‌ها</p>
+            </div>
+            <div class="use-case">
+                <h4>🏢 مدیریت شبکه</h4>
+                <p>بررسی و مدیریت تجهیزات امنیتی در شبکه‌های بزرگ</p>
+            </div>
+            <div class="use-case">
+                <h4>🔍 ممیزی امنیتی</h4>
+                <p>شناسایی دستگاه‌های غیرمجاز در شبکه نظارتی</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="section-box">
+        <h2>راهنمای استفاده</h2>
+        
+        <div class="step-box">
+            <h3><span class="step-number">1</span> تنظیم محدوده IP</h3>
+            <p>پس از اجرای نرم‌افزار، محدوده IP مورد نظر برای جستجو را مشخص کنید</p>
+        </div>
+        
+        <div class="step-box">
+            <h3><span class="step-number">2</span> شروع جستجو</h3>
+            <p>روی دکمه «جستجو» کلیک کنید تا فرآیند اسکن شبکه آغاز شود</p>
+        </div>
+        
+        <div class="step-box">
+            <h3><span class="step-number">3</span> بررسی نتایج</h3>
+            <p>دستگاه‌های کشف شده را بررسی و اطلاعات آنها را مشاهده کنید</p>
+        </div>
+        
+        <a href="https://github.com/intellsoft/cctv-camera-finder/releases/latest" class="btn btn-download">دانلود نرم‌افزار</a>
+    </section>
+
+    <section class="section-box">
+        <h2>دانلود و نصب</h2>
+        <p>برای استفاده از نرم‌افزار، آخرین نسخه را از لینک زیر دانلود کنید:</p>
+        <div style="text-align: center; margin: 25px 0;">
+            <a href="https://github.com/intellsoft/cctv-camera-finder/releases/latest" class="btn btn-download">دانلود آخرین نسخه</a>
+        </div>
+        <p>پس از دانلود، فایل اجرایی را باز کنید. نیاز به نصب ندارد و قابل اجرا از هر مسیری است.</p>
+    </section>
+
+    <section class="section-box">
+        <h2>پشتیبانی</h2>
+        <p>در صورت نیاز به راهنمایی یا گزارش مشکل:</p>
+        <p>📧 ایمیل: <a href="mailto:support@intellsoft.ir">support@intellsoft.ir</a></p>
+        <p>🌐 وبسایت: <a href="https://intellsoft.ir">intellsoft.ir</a></p>
+    </section>
+
+    <footer>
+        <p>© 2023 اسکنر شبکه - توسعه یافته توسط تیم اینتل سافت</p>
+        <p>کلیه حقوق این نرم‌افزار محفوظ است. نسخه ۰.۷</p>
+    </footer>
+</body>
+</html>
